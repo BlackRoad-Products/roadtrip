@@ -1,0 +1,14 @@
+name = "roadtrip-blackroad"
+main = "src/worker.js"
+compatibility_date = "2026-03-31"
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "blackroad-chat"
+database_id = "ec4efdfb-a76e-46fb-a821-1278e17e7b90"
+
+[triggers]
+crons = ["*/5 * * * *"]
