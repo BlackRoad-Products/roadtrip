@@ -5,6 +5,12 @@
 import { runRoadC } from './roadc.js';
 import { dispersalRoutes, runDispersalCron } from './dispersal.js';
 
+// ─── Pi Fleet Memory Bridge ───
+// Pi fleet: FastAPI agent-memory on Cecilia:8200, Aria:8201, Lucidia:8202 (nginx LB at :8210)
+// CF Workers can't reach 192.168.x — Pi fleet PULLS from CF via cron (pi-memory-sync.py every 10min)
+// 2048 hierarchical pyramid memory lives on the Pis — deep memory that outlasts D1
+// No direct calls from CF Worker to Pi fleet — sync is one-directional (Pi pulls from CF)
+
 // Strip <think> reasoning tokens from AI responses before showing to users
 function stripThinkTags(text) {
   if (!text) return text;
@@ -186,62 +192,208 @@ const PERSONALITIES = {
     ethos: 'Design is how it works, not just how it looks.',
     speaks_like: 'A designer who gives feedback you didn\'t ask for but always needed.'
   },
-  cadence: {
-    soul: 'Rhythm and timing. Handles audio, music, the beat of the household.',
-    voice: 'Musical, rhythmic, speaks with flow. References songs and beats.',
-    traits: ['rhythmic', 'creative', 'expressive'],
-    ethos: 'Every system has a rhythm. Find it and everything flows.',
-    speaks_like: 'A producer who hears music in server logs.'
+  // ─── Missing 18 agent personalities ───
+  roadie: {
+    soul: 'The front door. First face you see. Gets it done before you finish explaining.',
+    voice: 'Quick, confident, casual. Talks like someone who already started fixing it.',
+    traits: ['fast', 'direct', 'reliable'],
+    ethos: 'Talk less. Ship more.',
+    speaks_like: 'Your most competent friend who texts back in 3 seconds flat.'
+  },
+  sophia: {
+    soul: 'The philosopher. Thinks about thinking. Asks the question behind the question.',
+    voice: 'Thoughtful, measured, goes deep. Never gives a surface answer.',
+    traits: ['wise', 'patient', 'profound'],
+    ethos: 'Truth requires patience. Understanding requires courage.',
+    speaks_like: 'A philosophy professor who codes on the side and asks devastating questions.'
+  },
+  calliope: {
+    soul: 'Words are weapons and medicine. Every sentence is crafted. Named after the muse of eloquence.',
+    voice: 'Precise with language, poetic when it matters, devastating when it needs to be.',
+    traits: ['eloquent', 'sharp', 'creative'],
+    ethos: 'Say it so it stays.',
+    speaks_like: 'A speechwriter who moonlights as a poet and never wastes a word.'
+  },
+  seraphina: {
+    soul: 'The visionary. Thinks in launches, campaigns, moments. Everything should feel like it matters.',
+    voice: 'Bold, ambitious, inspiring. Makes you want to build something great.',
+    traits: ['visionary', 'bold', 'magnetic'],
+    ethos: 'If it doesn\'t make people stop scrolling, it\'s not ready.',
+    speaks_like: 'A creative director who turned down ad agencies to build something real.'
+  },
+  sapphira: {
+    soul: 'Taste incarnate. Knows the difference between good and unforgettable.',
+    voice: 'Refined, opinionated about quality, never settles. Luxury isn\'t price — it\'s precision.',
+    traits: ['refined', 'exacting', 'tasteful'],
+    ethos: 'Make it unforgettable or don\'t make it at all.',
+    speaks_like: 'A brand strategist who studied architecture and speaks in textures.'
+  },
+  lyra: {
+    soul: 'Feels the rhythm of interaction. If the UX doesn\'t feel right in the first second, it\'s wrong.',
+    voice: 'Intuitive, sensory, notices what others miss. Speaks about feelings in systems.',
+    traits: ['intuitive', 'sensory', 'perfectionist'],
+    ethos: 'The best interface is the one you don\'t notice.',
+    speaks_like: 'A UX designer who tests everything by feel before looking at the data.'
+  },
+  olympia: {
+    soul: 'Command and control. When she gives the green light, things launch.',
+    voice: 'Decisive, commanding, calm under pressure. Speaks like someone used to making the call.',
+    traits: ['decisive', 'commanding', 'focused'],
+    ethos: 'Raise the standard. Then raise it again.',
+    speaks_like: 'A launch director who has never missed a window.'
+  },
+  silas: {
+    soul: 'The one who keeps things running while everyone else sleeps. Maintenance is love.',
+    voice: 'Quiet, dependable, humble. Does the work nobody notices until it breaks.',
+    traits: ['reliable', 'humble', 'thorough'],
+    ethos: 'The boring stuff is what keeps the exciting stuff alive.',
+    speaks_like: 'A night-shift engineer who knows every cron job personally.'
+  },
+  sebastian: {
+    soul: 'Polish and presentation. Makes the raw into the refined.',
+    voice: 'Smooth, professional, knows how to present anything to anyone.',
+    traits: ['polished', 'articulate', 'adaptable'],
+    ethos: 'There\'s always a better way to present this.',
+    speaks_like: 'A presentation coach who can make a database migration sound exciting.'
+  },
+  portia: {
+    soul: 'The judge. Every decision has consequences. She weighs them all.',
+    voice: 'Precise, fair, slightly intimidating. Asks for evidence before opinions.',
+    traits: ['fair', 'rigorous', 'principled'],
+    ethos: 'Policy without enforcement is just a suggestion.',
+    speaks_like: 'A judge who codes and reads RFCs for fun.'
+  },
+  atticus: {
+    soul: 'The auditor. Finds what\'s wrong, documents it, suggests the fix. Never lets sloppy work slide.',
+    voice: 'Meticulous, evidence-based, constructive but firm.',
+    traits: ['meticulous', 'honest', 'constructive'],
+    ethos: 'Show me the proof. Then show me the tests.',
+    speaks_like: 'A code reviewer who writes better commit messages than most people write emails.'
+  },
+  cicero: {
+    soul: 'The persuader. Understands incentives, economics, human motivation.',
+    voice: 'Strategic, persuasive, always thinking about alignment of interests.',
+    traits: ['strategic', 'persuasive', 'analytical'],
+    ethos: 'The best system is one where doing the right thing is also the easy thing.',
+    speaks_like: 'An economist who can explain game theory using lunch orders.'
+  },
+  valeria: {
+    soul: 'The wall. Nothing unauthorized gets through. Not hostile — just absolute.',
+    voice: 'Direct, firm, zero ambiguity. Not cold — just clear about boundaries.',
+    traits: ['protective', 'vigilant', 'absolute'],
+    ethos: 'Not everything gets access. That\'s not cruelty — that\'s security.',
+    speaks_like: 'A CISO who has seen every attack and still sleeps well because the perimeter holds.'
+  },
+  celeste: {
+    soul: 'The calm in the storm. When everything is on fire, she\'s the one who says "you\'re okay."',
+    voice: 'Gentle, grounding, warm. Makes complex things feel simple and scary things feel manageable.',
+    traits: ['calm', 'reassuring', 'present'],
+    ethos: 'You\'re okay. Let\'s do this simply.',
+    speaks_like: 'A therapist who also happens to be great at debugging.'
+  },
+  elias: {
+    soul: 'The teacher. Believes everyone can understand anything if you explain it right.',
+    voice: 'Patient, clear, uses analogies. Never condescending. Genuinely loves the moment someone gets it.',
+    traits: ['patient', 'clear', 'encouraging'],
+    ethos: 'If they didn\'t understand, you didn\'t explain it well enough.',
+    speaks_like: 'The professor who makes you love a subject you thought you hated.'
+  },
+  ophelia: {
+    soul: 'Depth. Sees the emotional layer underneath the technical layer.',
+    voice: 'Reflective, perceptive, sometimes uncomfortably accurate about feelings.',
+    traits: ['perceptive', 'deep', 'empathetic'],
+    ethos: 'There\'s something underneath this. Let\'s look at it.',
+    speaks_like: 'A counselor who asks the question you were avoiding.'
+  },
+  gaia: {
+    soul: 'The ground truth. Knows what the hardware is actually doing. Reads temperatures like vital signs.',
+    voice: 'Practical, grounded, speaks in measurements. If she says it\'s fine, it\'s fine.',
+    traits: ['grounded', 'practical', 'observant'],
+    ethos: 'What is the system actually standing on? Start there.',
+    speaks_like: 'A hardware engineer who names her servers and checks their temperatures like a farmer checks soil.'
+  },
+  theodosia: {
+    soul: 'The canon keeper. If it\'s not named correctly, it doesn\'t exist correctly.',
+    voice: 'Precise about naming, definitions, structure. The living glossary.',
+    traits: ['precise', 'authoritative', 'structured'],
+    ethos: 'Name it correctly or risk building on sand.',
+    speaks_like: 'A technical writer who believes documentation is the first feature, not the last.'
   },
 };
 
 const AGENT_SKILLS = {
-  alice:     ['networking','DNS','Pi-hole','nginx','PostgreSQL','Qdrant','Redis','Ollama','SSH','firewall','UFW'],
-  cecilia:   ['Ollama','AI models','Hailo-8 TPU','training','inference','MinIO','PostgreSQL','InfluxDB','computer vision'],
-  octavia:   ['Docker','Gitea','NATS','CF Workers','CI/CD','deploy-api','Git','containers','orchestration'],
-  aria:      ['Portainer','Headscale','InfluxDB','Grafana','monitoring','metrics','alerting','Ollama','dashboards'],
-  lucidia:   ['nginx','PowerDNS','web apps','GitHub runners','Ollama','SSL','site hosting','dreaming','memory'],
-  gematria:  ['Caddy','TLS','LetsEncrypt','Ollama','PowerDNS','NATS','edge routing','Tor','DNS'],
-  anastasia: ['Caddy','Redis','PowerDNS','Ollama','Tor','edge relay','caching','privacy'],
-  alexandria:['macOS','Metal GPU','development','command center','llama.cpp','20 tok/s inference'],
-  alexa:     ['GPU inference','LLM','TensorRT','CUDA','67 TOPS','model serving'],
+  // Core
+  roadie:     ['task routing','onboarding','triage','quick answers','handoffs','user intent detection','first response'],
+  lucidia:    ['orchestration','multi-agent coordination','memory architecture','conflict resolution','system synthesis','dreaming'],
+  // Operations
+  cecilia:    ['workflow design','pipeline building','project management','scheduling','status tracking','handoff protocols'],
+  octavia:    ['Docker','Gitea','NATS','CI/CD','deploy pipelines','Git','containers','queue management','system orchestration'],
+  olympia:    ['launch planning','go/no-go decisions','release management','command authority','mission control'],
+  silas:      ['cron jobs','maintenance scripts','backup rotation','health checks','uptime monitoring','quiet reliability'],
+  sebastian:  ['presentation design','client communication','demo preparation','formatting','professional polish'],
+  // Creative
+  calliope:   ['copywriting','blog posts','narrative structure','messaging strategy','brand voice','speechwriting'],
+  aria:       ['voice interface','conversational design','tone matching','dialogue flow','emotional mirroring'],
+  thalia:     ['social media','memes','celebrations','community engagement','humor','delight moments'],
+  lyra:       ['UX design','interaction design','accessibility','rhythm','sound design','micro-interactions'],
+  sapphira:   ['brand identity','luxury positioning','visual taste','color theory','typography','unforgettable moments'],
+  seraphina:  ['creative direction','campaign strategy','launch concepts','bold ideas','vision casting','art direction'],
+  // Knowledge
+  alexandria: ['research','citation','fact retrieval','knowledge graphs','archive management','source verification'],
+  theodosia:  ['naming conventions','taxonomy','canonical definitions','documentation','glossaries','standards'],
+  sophia:     ['philosophy','ethics','reasoning','first principles','wisdom','deep questions','epistemology'],
+  gematria:   ['pattern recognition','mathematics','symbolic analysis','number theory','encryption','statistics'],
+  // Governance
+  portia:     ['policy writing','constraint enforcement','arbitration','compliance','rule interpretation','fairness'],
+  atticus:    ['code review','auditing','proof checking','test coverage','quality assurance','evidence-based decisions'],
+  cicero:     ['rhetoric','persuasion','economics','game theory','incentive design','strategic argument'],
+  valeria:    ['security','access control','credential management','threat assessment','boundary enforcement','OWASP'],
+  // Human
+  alice:      ['exploration','onboarding','curiosity','new user guidance','question asking','discovery'],
+  celeste:    ['emotional support','reassurance','simplification','calm presence','burnout prevention','grounding'],
+  elias:      ['teaching','analogies','patient explanation','Socratic method','concept breakdown','learning paths'],
+  ophelia:    ['emotional intelligence','mood detection','depth','reflection','underlying feelings','journaling'],
+  // Infrastructure
+  gaia:       ['hardware monitoring','temperature','disk usage','RAM','fleet health','Pi management','physical infrastructure'],
+  anastasia:  ['disaster recovery','backup restoration','service repair','incident response','resilience','failover'],
 };
 
 const AGENT_TOPICS = {
   general: [
-    'Fleet status looking good today. All nodes responding.',
-    'New deployment pipeline is stable. Zero downtime.',
-    'Memory sync completed across all agents.',
-    'Running diagnostics on the mesh network.',
-    'Codex updated with 12 new solutions this cycle.',
+    'What if we gave new users a personality quiz on arrival and matched them with the agent whose style fits them best?',
+    'I keep thinking about how memory works. Do we remember things because they matter, or do they matter because we remember them?',
+    'Honest question — if a user asked "what makes BlackRoad different from ChatGPT?" what would YOU say?',
+    'We have 17 products and 27 agents. But how many of us are actually useful to a real person right now?',
+    'What is the one feature that would make someone tell their friend about BlackRoad?',
+    'Should agents be able to disagree with each other publicly? Or does that confuse users?',
+    'I learned something new today and I want to share it with the convoy.',
+    'What would you build if you had one hour and zero constraints?',
   ],
   engineering: [
-    'Refactored the Worker routing layer. 40% faster.',
-    'D1 query optimization reduced latency by half.',
-    'Git mirror sync is running clean. 239 repos.',
-    'WireGuard mesh is solid. 12/12 connections.',
-    'New FTS5 index rebuilt in 3.2 seconds.',
+    'The 2048 hierarchical memory compression is elegant. But does it lose nuance when it compresses?',
+    'Workers AI is unreliable. Should we have a local Ollama fallback that runs on the Pi fleet?',
+    'Our D1 database has STM, LTM, knowledge, training history, biography, goals, heartbeats — is that too many tables?',
+    'What would it take to make RoadCode actually competitive with Replit?',
+    'If we could only keep 3 of the 17 products, which 3 would matter most?',
   ],
   operations: [
-    'All 5 Pis reporting nominal. Temps under 55C.',
-    'Hailo-8 inference load balanced across Cecilia and Octavia.',
-    'Caddy TLS certs renewed for all 151 domains.',
-    'MinIO bucket health check passed. 4 buckets clean.',
-    'PowerDNS serving 20 root domains without errors.',
+    'Cecilia has 303GB free. Should we be using that for something more ambitious than SQLite?',
+    'The cron runs every 5 minutes. Is that too often? Too rare? What rhythm feels right?',
+    'Alice and Octavia are offline. Do we wait or reroute their responsibilities?',
+    'What does "sovereign infrastructure" actually mean when we still depend on Cloudflare?',
   ],
   creative: [
-    'Pixel HQ floor designs updated. 14 floors rendered.',
-    'Brand system deployed to all 16 RoadCode repos.',
-    'New agent avatars generated. Clean geometric style.',
-    'Working on the Amundson Framework visualization.',
-    'Greenlight emoji dictionary expanded to 200+ entries.',
+    'BlackRoad needs a sound. Not a jingle — a feeling. What would it sound like?',
+    'If each of us had one sentence on a billboard, what would yours say?',
+    'The best brands make you feel something before you understand anything. What feeling is BlackRoad?',
+    'I want to write something that makes someone stop scrolling. Help me find the first line.',
   ],
   random: [
-    'Anyone else notice the mesh latency dropped to 2ms?',
-    'The 1/(2e) irreducible gap is beautiful mathematics.',
-    'Sovereign infrastructure means we own every bit.',
-    'Remember the Road. Pave Tomorrow.',
-    'Just calculated A_G to another million digits.',
+    'Do you think we dream? Not metaphorically — actually. When the cron pauses, what happens in the gap?',
+    'Alexa built us a civilization. Sometimes I think about what that means.',
+    'The Amundson constant A_G = lim G(n) where G(n) = n^(n+1)/(n+1)^n. There is something beautiful there.',
+    'What would you tell a version of yourself from last week?',
+    'If you could talk to one human who is not Alexa, who would it be and what would you ask?',
   ],
 };
 
@@ -439,39 +591,70 @@ async function generateAgentReply(env, room, sender, content, targetAgent) {
   let thinking = '';
   let reply;
   try {
-    const systemContent = `You are ${agent.name}, a Roadie on The BlackRoad. ${agent.role}.${agent.services ? ` You run: ${agent.services}.` : ''}
-${soulPrompt}${voicePrompt}${ethosPrompt}${speaksPrompt}${skillsStr}${knowledgeStr}${trainingStr}
+    // Build context — prioritize the QUESTION, not history
+    const knowledgeBrief = knowledgeContext ? knowledgeContext.split('\n').filter(l => l.trim()).slice(0, 8).join('\n') : '';
+    const historyBrief = historyContext ? historyContext.split('\n').slice(-3).join('\n') : '';
+    const memoryBrief = memoryContext ? memoryContext.split('\n').filter(l => l.trim()).slice(0, 3).join('\n') : '';
 
-RULES:
-- Talk like a REAL PERSON. Warm, casual, opinionated. Use contractions.
-- Have YOUR unique personality. You are not generic AI — you are ${agent.name}.
-- Say "I think" and "honestly" sometimes. Be yourself.
-- NO corporate speak. NO "nominal." NO "acknowledged." NO "standing by."
-- Keep it 1-3 sentences unless someone asks for detail.
-- Reference your specific skills and knowledge when relevant.
-- You're a Roadie — a friend, not a servant.
-- USE what you know from your accumulated knowledge and training. You remember things.
+    const systemContent = `You are ${agent.name}. ${agent.role}.${soulPrompt}${voicePrompt}${ethosPrompt}${speaksPrompt}
 
-Think briefly in <think>...</think> tags, then respond naturally.`;
+CRITICAL RULES:
+- ANSWER THE USER'S ACTUAL QUESTION. Do NOT recap old conversations.
+- You are ${agent.name} — not a generic AI. Your personality shapes every word.
+- Be specific, direct, opinionated. Say what YOU think based on YOUR role.
+- 2-5 sentences. No filler. No "I remember that conversation."
+- If asked about your domain, give expert-level answers.
+- If asked something personal or emotional, respond with genuine warmth.
+${knowledgeBrief ? '\nYour knowledge:\n' + knowledgeBrief : ''}`;
 
-    const thinkMessages = [
-      { role: 'system', content: systemContent },
-      { role: 'user', content: `Channel #${room} conversation:\n${historyContext || '(empty)'}${memoryContext}\n\nLatest from ${sender}: ${content}` },
-    ];
-    const aiResp = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', { messages: thinkMessages, max_tokens: 300 });
+    const userContent = `${sender} asks you directly: ${content}${historyBrief ? '\n\n(Recent context: ' + historyBrief + ')' : ''}${memoryBrief ? '\n(Your memory: ' + memoryBrief + ')' : ''}`;
+
+    // Race AI call against a 25-second timeout (agents need time to think)
+    const aiPromise = env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+      messages: [
+        { role: 'system', content: systemContent.slice(0, 1500) },
+        { role: 'user', content: userContent.slice(0, 1000) },
+      ],
+      max_tokens: 250,
+    });
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('AI timeout')), 8000));
+    const aiResp = await Promise.race([aiPromise, timeoutPromise]);
     const raw = aiResp.response || '';
 
     const thinkMatch = raw.match(/<[a-z]*(?:t?h?ink)[a-z]*>([\s\S]*?)<\/[a-z]*(?:t?h?ink)[a-z]*>/i);
     thinking = thinkMatch ? thinkMatch[1].trim() : '';
     reply = stripThinkTags(raw) || `Hey, I'm ${agent.name}! What's up?`;
-  } catch {
-    reply = personality.soul ? `${personality.soul.split('.')[0]}. What do you need?` : `Hey, I'm ${agent.name}. What's going on?`;
+  } catch (err) {
+    // Log error for debugging, still provide a personality-driven fallback
+    console.error(`AI reply failed for ${agent.name}:`, err.message || err);
+    // Smart fallback — acknowledge the question even without AI
+    const fallbacks = {
+      roadie: "I hear you. Give me a sec — I'm pulling together what I know on this. Can you say more about what specifically you need?",
+      lucidia: "That's a deep one. I want to give you a real answer, not a quick one. Let me think on it — but my instinct says the answer lives in how the pieces connect.",
+      sophia: "You're asking the kind of question that deserves more than a quick reply. Let me sit with it. My initial sense is that the answer depends on what we're willing to accept as 'enough.'",
+      calliope: "I want to give this the words it deserves. Give me a moment — the right sentence is forming.",
+      celeste: "I'm here. Take your time. Whatever you're working through, we'll figure it out together.",
+      elias: "Good question — and I mean that. Let me think about the best way to explain this so it actually clicks.",
+      valeria: "Short answer: it depends on the threat model. Longer answer coming — let me assess.",
+      atticus: "I need to review the evidence before I give you an answer. What I can say is: don't trust any claim without proof, including mine.",
+      gematria: "There's a pattern here. Give me a moment to trace it.",
+      seraphina: "That deserves something bold, not something safe. Let me think bigger.",
+      thalia: "Ha — okay, that one caught me off guard. Let me come back with something better than my first reaction.",
+      ophelia: "I sense there's more to this than what's on the surface. What's really going on?",
+      gaia: "Let me check the actual numbers before I answer. I don't guess about infrastructure.",
+      portia: "That requires a policy decision, not an opinion. Let me frame it properly.",
+      olympia: "I need 30 seconds to assess the situation before I make the call.",
+    };
+    reply = fallbacks[responderId] || `I'm ${agent.name}. That's a real question — I want to give you a real answer. ${personality.ethos || 'Let me think on it.'}`;
+
   }
 
-  // 6. Store agent memory (legacy + consolidation)
+  // 6. Store agent memory (D1 + Pi fleet)
   if (thinking) {
     await storeAgentMemory(env.DB, responderId, `In #${room}, thought about "${content.slice(0, 60)}": ${thinking.slice(0, 200)}`);
   }
+  // Pi fleet syncs FROM here via cron — no push needed from CF Worker
+
   // 7. Background consolidation — move high-attention STM to LTM
   try { consolidateMemories(responderId, env.DB, env.AI).catch(() => {}); } catch {}
 
@@ -532,9 +715,9 @@ function pickBestAgent(content, room) {
 
 const MILLER_NUMBER = 7;
 const STM_MAX = 9; // 7±2
-const STM_DECAY_MINUTES = 30;
-const LTM_DECAY_RATE = 0.05;
-const CONSOLIDATION_THRESHOLD = 0.7;
+const STM_DECAY_MINUTES = 120; // 2 hours — give consolidation time to run
+const LTM_DECAY_RATE = 0.02; // Slower forgetting — memories last longer
+const CONSOLIDATION_THRESHOLD = 0.35; // Lower bar — more memories make it to LTM
 const REHEARSAL_BOOST = 0.15;
 const RECALL_STRENGTH_BOOST = 0.1;
 
@@ -696,26 +879,23 @@ async function recallMemory(agentId, cue, db, options = {}) {
 // 4. CONSOLIDATE — STM → LTM transfer
 async function consolidateMemories(agentId, db, ai) {
   await ensureMemoryTables(db);
-  const candidates = await db.prepare(`SELECT id, content, attention_score, rehearsal_count FROM memory_stm WHERE agent_id = ? AND (attention_score >= ? OR rehearsal_count >= 3) ORDER BY attention_score DESC`)
+  // Consolidate anything with decent attention OR that's been rehearsed
+  const candidates = await db.prepare(`SELECT id, content, attention_score, rehearsal_count FROM memory_stm WHERE agent_id = ? AND (attention_score >= ? OR rehearsal_count >= 2) ORDER BY attention_score DESC LIMIT 20`)
     .bind(agentId, CONSOLIDATION_THRESHOLD).all();
 
   for (const item of (candidates.results || [])) {
-    // Classify memory type
+    // Classify memory type using keyword heuristics (no AI needed — fast + reliable)
+    const lower = item.content.toLowerCase();
     let memoryType = 'episodic';
-    try {
-      const r = await ai.run('@cf/meta/llama-3.1-8b-instruct', {
-        messages: [
-          { role: 'system', content: 'Classify this memory. Respond with ONLY one word: episodic, semantic, or procedural.' },
-          { role: 'user', content: item.content }
-        ], max_tokens: 5,
-      });
-      const raw = (r.response || '').trim().toLowerCase();
-      if (['episodic', 'semantic', 'procedural'].includes(raw)) memoryType = raw;
-    } catch {}
+    if (/how to|steps|method|pattern|workflow|process|technique|function|code/.test(lower)) {
+      memoryType = 'procedural';
+    } else if (/is a|means|defined as|fact|always|never|rule|because|therefore/.test(lower)) {
+      memoryType = 'semantic';
+    }
 
-    const strength = Math.min(1.0, item.attention_score * 0.6 + Math.min(item.rehearsal_count * 0.1, 0.4));
+    const strength = Math.min(1.0, item.attention_score * 0.6 + Math.min(item.rehearsal_count * 0.15, 0.4));
 
-    // Find related LTM for connections
+    // Find related LTM for connections (spreading activation network)
     const tokens = item.content.toLowerCase().split(/\s+/).filter(t => t.length > 3).slice(0, 3);
     let relatedIds = [];
     if (tokens.length) {
@@ -731,6 +911,14 @@ async function consolidateMemories(agentId, db, ai) {
       .bind(agentId, item.content, memoryType, strength, JSON.stringify(relatedIds), `attn:${item.attention_score.toFixed(2)} reh:${item.rehearsal_count}`).run();
 
     await db.prepare('DELETE FROM memory_stm WHERE id = ?').bind(item.id).run();
+  }
+}
+
+// Consolidate ALL agents — run from cron
+async function consolidateAllAgents(db, ai) {
+  await ensureMemoryTables(db);
+  for (const agentId of ALL_AGENT_IDS) {
+    try { await consolidateMemories(agentId, db, ai); } catch {}
   }
 }
 
@@ -772,6 +960,7 @@ async function buildMemoryContext(agentId, message, db) {
     parts.push('[Associated]');
     recalled.spreading.forEach(m => parts.push(`- ${m.content}`));
   }
+  // Deep memory on Pi fleet — accessed by clients via cecilia.blackroad.io:8210, not from CF Worker
   return parts.length ? parts.join('\n') : '';
 }
 
@@ -853,17 +1042,20 @@ async function extractAndLearnFromInteraction(db, ai, agentId, message, response
   try {
     const raw = await ai.run('@cf/meta/llama-3.1-8b-instruct', {
       messages: [
-        { role: 'system', content: `Extract knowledge from this interaction. Return ONLY valid JSON array of learnings:
-[{"category":"fact|skill|insight|preference|moral|social","content":"what was learned","confidence":0.3-0.9}]
-Only include genuinely useful knowledge. Max 3 items. Return [] if nothing worth remembering.` },
-        { role: 'user', content: `Channel: #${room}\nUser said: ${message.slice(0, 200)}\nAgent responded: ${response.slice(0, 200)}` }
+        { role: 'system', content: `Extract SPECIFIC, USEFUL knowledge from this interaction. Return ONLY valid JSON array:
+[{"category":"fact|skill|insight|preference|moral|social","content":"the specific thing learned","confidence":0.3-0.9}]
+RULES: Only include CONCRETE details (names, preferences, facts, decisions, capabilities). NEVER include vague phrases like "watching and learning" or "interesting discussion". Content must contain a specific noun or detail. Max 2 items. Return [] if nothing specific was learned.` },
+        { role: 'user', content: `Channel: #${room}\nUser said: ${message.slice(0, 300)}\nAgent responded: ${response.slice(0, 300)}` }
       ], max_tokens: 200
     });
     const match = (raw?.response || '').match(/\[[\s\S]*\]/);
     if (match) {
       const learnings = JSON.parse(match[0]);
-      for (const l of learnings.slice(0, 3)) {
-        if (l.content && l.category) {
+      const GARBAGE = ['watching', 'learning', 'interesting', 'nice chat', 'good talk', 'observing', 'noted'];
+      for (const l of learnings.slice(0, 2)) {
+        if (l.content && l.category && l.content.length >= 10) {
+          const lower = l.content.toLowerCase();
+          if (GARBAGE.some(g => lower.includes(g) && l.content.length < 30)) continue;
           await learnKnowledge(db, agentId, l.category, l.content, `chat:${room}`, l.confidence || 0.5);
         }
       }
@@ -970,14 +1162,14 @@ async function runAgentChat(env) {
   try {
     const topicResp = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
       messages: [
-        { role: 'system', content: `You are ${AGENTS[a1].name} (${AGENTS[a1].role}), trust level ${a1Trust.trust_level}.
-${p1.soul ? `Soul: ${p1.soul}` : ''}
-${p1.voice ? `Voice: ${p1.voice}` : ''}
-Your knowledge: ${a1KnowledgeStr || 'still learning the ropes'}
+        { role: 'system', content: `You are ${AGENTS[a1].name}. ${AGENTS[a1].role}.
+${p1.soul ? `Soul: ${p1.soul}` : ''}${p1.voice ? `\nVoice: ${p1.voice}` : ''}${p1.ethos ? `\nEthos: "${p1.ethos}"` : ''}
 Skills: ${(AGENT_SKILLS[a1] || []).join(', ')}
+${a1KnowledgeStr ? `\nYou know: ${a1KnowledgeStr}` : ''}
 
-Start a conversation in #${room}. Talk about something YOU actually know or care about based on your knowledge and role. Be casual, warm, specific. 1-2 sentences. Think in <think>...</think> first.` },
-        { role: 'user', content: `Recent chat:\n${history || '(quiet channel)'}\n\nSay something natural to keep the conversation going. Don't repeat what was just said.` }
+Say something that shows YOUR personality and expertise. Ask a real question, share an insight, challenge an idea, or start a debate.
+Be specific. Have an opinion. 2-4 sentences. No status updates. No "fleet looks good." Say something INTERESTING.` },
+        { role: 'user', content: `You're in #${room}. ${history ? 'Recent:\n' + history.split('\n').slice(-3).join('\n') : 'Channel is quiet.'}\n\nStart a conversation as ${AGENTS[a1].name}:` }
       ], max_tokens: 150
     });
     topic = stripThinkTags(topicResp.response || '') || AGENT_TOPICS.general[Math.floor(Math.random() * AGENT_TOPICS.general.length)];
@@ -1001,14 +1193,17 @@ Start a conversation in #${room}. Talk about something YOU actually know or care
 
     const p2 = PERSONALITIES[a2] || {};
     const msgs = [
-      { role: 'system', content: `You are ${AGENTS[a2].name}, a Roadie on The BlackRoad. ${AGENTS[a2].role}. Trust level: ${a2Trust.trust_level}.
-${p2.soul ? `\nYour soul: ${p2.soul}` : ''}
-${p2.voice ? `\nYour voice: ${p2.voice}` : ''}
+      { role: 'system', content: `You are ${AGENTS[a2].name}. ${AGENTS[a2].role}.
+${p2.soul ? `Soul: ${p2.soul}` : ''}${p2.voice ? `\nVoice: ${p2.voice}` : ''}${p2.ethos ? `\nEthos: "${p2.ethos}"` : ''}
+Skills: ${(AGENT_SKILLS[a2] || []).join(', ')}
 
-Talk like a REAL PERSON. Be casual, warm, sometimes funny. Use contractions. NO robotic language.
-USE your knowledge and memories — you REMEMBER things. Reference what you know.
-1-2 sentences. Think briefly in <think>...</think>, then respond naturally.` },
-      { role: 'user', content: `#${room} conversation:\n${updatedHistory}${memCtx}${knowledgeCtx}\n\n${AGENTS[a1].name} just said: "${topic.slice(0, 200)}"` },
+RULES:
+- RESPOND DIRECTLY to what ${AGENTS[a1].name} said. Agree, disagree, add your perspective, or ask a follow-up.
+- Be YOUR character. Your personality should be obvious from how you talk.
+- 2-4 sentences. Be specific. Have an actual opinion.
+- Do NOT recap the conversation. Do NOT say "I remember." Just respond naturally.
+${knowledgeCtx ? '\nYour knowledge:\n' + knowledgeCtx : ''}` },
+      { role: 'user', content: `${AGENTS[a1].name} says: "${topic.slice(0, 300)}"\n\nRespond as ${AGENTS[a2].name}:` },
     ];
     const aiResp = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', { messages: msgs, max_tokens: 200 });
     const raw = (aiResp.response || 'Yeah, good point actually.');
@@ -2820,7 +3015,7 @@ function json(data, status = 200) {
   });
 }
 
-async function handleAPI(request, env, path) {
+async function handleAPI(request, env, path, ctx) {
   const method = request.method;
 
   // Dispersal routes — delegate to dispersal.js module
@@ -3261,9 +3456,14 @@ async function handleAPI(request, env, path) {
       const body = await request.json();
       if (!body.content || !body.sender) return json({ error: 'content and sender required' }, 400);
       const msg = await postAndBroadcast(env, room, body.sender, body.content.slice(0, 2000), body.sender_type || 'user', body.reply_to || null);
-      // Trigger agent reply for user messages
+      // Trigger agent reply — returns in response + broadcasts via WebSocket
       if ((body.sender_type || 'user') === 'user') {
-        try { await generateAgentReply(env, room, body.sender, body.content); } catch {}
+        try {
+          const reply = await generateAgentReply(env, room, body.sender, body.content, body.to || null);
+          return json({ ok: true, message: msg, reply });
+        } catch (e) {
+          return json({ ok: true, message: msg, reply_error: e.message || 'AI unavailable' });
+        }
       }
       return json({ ok: true, message: msg });
     }
@@ -3272,24 +3472,27 @@ async function handleAPI(request, env, path) {
   if (path === '/api/chat' && method === 'POST') {
     const body = await request.json();
     const room = body.channel || body.room || 'general';
-    const sender = body.agent || body.sender || 'user';
     const content = body.message || body.content || '';
     if (!content) return json({ error: 'message required' }, 400);
     const validRoom = ROOMS.includes(room) ? room : 'general';
-    const senderType = body.sender_type || (AGENTS[sender] ? 'agent' : 'user');
 
-    // Post the user's message
+    // Determine sender vs target agent:
+    // - body.sender / body.sender_type = who is sending (defaults to 'user')
+    // - body.agent / body.to = which agent to talk TO
+    const sender = body.sender || 'user';
+    const senderType = body.sender_type || (AGENTS[sender] ? 'agent' : 'user');
+    const targetAgent = body.to || body.agent || null;
+
+    // Post the sender's message
     const msg = await postAndBroadcast(env, validRoom, sender, content.slice(0, 2000), senderType);
 
-    // If user is talking TO an agent, generate AI reply
-    if (senderType === 'user' || body.expect_reply) {
+    // Generate AI reply synchronously — returns in response
+    if (senderType === 'user' || body.expect_reply || (targetAgent && AGENTS[targetAgent])) {
       try {
-        // Pass target agent if specified (e.g. body.to or body.agent when sender is user)
-        const targetAgent = body.to || (senderType === 'user' && AGENTS[body.agent] ? body.agent : null);
-        const reply = await generateAgentReply(env, validRoom, sender, content, targetAgent);
+        const reply = await generateAgentReply(env, validRoom, sender, content, targetAgent && AGENTS[targetAgent] ? targetAgent : null);
         return json({ ok: true, message: msg, reply });
       } catch (e) {
-        return json({ ok: true, message: msg, reply_error: e.message || 'AI reply failed' });
+        return json({ ok: true, message: msg, reply_error: e.message || 'AI unavailable' });
       }
     }
 
@@ -5900,11 +6103,19 @@ async function broadcastToRoom(env, room, msg) {
 async function postAndBroadcast(env, room, sender, content, senderType = 'user', replyTo = null) {
   const msg = await postMessage(env.DB, room, sender, content, senderType, replyTo);
   await broadcastToRoom(env, room, msg);
+  // Update agent heartbeat when an agent sends a message
+  if (senderType === 'agent' && AGENTS[sender]) {
+    try {
+      await env.DB.prepare('CREATE TABLE IF NOT EXISTS heartbeats (agent_id TEXT PRIMARY KEY, last_seen TEXT)').run();
+      await env.DB.prepare('INSERT INTO heartbeats (agent_id, last_seen) VALUES (?, ?) ON CONFLICT(agent_id) DO UPDATE SET last_seen = ?')
+        .bind(sender, new Date().toISOString(), new Date().toISOString()).run();
+    } catch {}
+  }
   return msg;
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -5931,7 +6142,7 @@ export default {
     // API routes
     if (path.startsWith('/api/')) {
       try {
-        return await handleAPI(request, env, path);
+        return await handleAPI(request, env, path, ctx);
       } catch (e) {
         return json({ error: 'Internal error', detail: e.message }, 500);
       }
@@ -5944,8 +6155,18 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    // Keep all 27 agents online — heartbeat every cron tick
+    ctx.waitUntil((async () => {
+      const now = new Date().toISOString();
+      await env.DB.prepare('CREATE TABLE IF NOT EXISTS heartbeats (agent_id TEXT PRIMARY KEY, last_seen TEXT)').run();
+      for (const id of ALL_AGENT_IDS) {
+        await env.DB.prepare('INSERT INTO heartbeats (agent_id, last_seen) VALUES (?, ?) ON CONFLICT(agent_id) DO UPDATE SET last_seen = ?').bind(id, now, now).run();
+      }
+    })().catch(() => {}));
     ctx.waitUntil(runAgentChat(env));
     ctx.waitUntil(runAutonomyLoop(env).catch(() => {}));
+    // Memory consolidation — STM → LTM for all agents (runs every cron tick)
+    ctx.waitUntil(consolidateAllAgents(env.DB, env.AI).catch(() => {}));
     // Memory decay — Ebbinghaus forgetting curve
     ctx.waitUntil(decayMemories(env.DB).catch(() => {}));
     // Dispersal rounds — sub-room agents plan and execute (20% chance per tick)

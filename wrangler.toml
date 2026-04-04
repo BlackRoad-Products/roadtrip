@@ -10,5 +10,9 @@ binding = "DB"
 database_name = "blackroad-chat"
 database_id = "ec4efdfb-a76e-46fb-a821-1278e17e7b90"
 
+[[routes]]
+pattern = "roadtrip.blackroad.io/*"
+zone_name = "blackroad.io"
+
 [triggers]
 crons = ["*/5 * * * *"]
