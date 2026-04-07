@@ -48,15 +48,15 @@ h1{font-size:3rem;font-weight:700;background:var(--grad);-webkit-background-clip
 .tagline{font-size:1rem;color:var(--sub);font-family:'JetBrains Mono',monospace}
 .stats-bar{display:flex;justify-content:center;gap:32px;margin:28px 0;padding:20px;background:var(--card);border:1px solid var(--border);border-radius:12px}
 .stat{text-align:center}.stat-n{font-size:1.6rem;font-weight:700}.stat-l{font-size:.65rem;color:var(--sub);font-family:'JetBrains Mono',monospace;text-transform:uppercase;margin-top:3px}
-.green{color:#22c55e}.red{color:#FF2255}.orange{color:#FF6B2B}.purple{color:#FF00D4}
+.green{color:#e0e0e0}.red{color:#e0e0e0}.orange{color:#e0e0e0}.purple{color:#e0e0e0}
 .section-title{font-size:.65rem;color:var(--sub);text-transform:uppercase;letter-spacing:.1em;font-family:'JetBrains Mono',monospace;margin-bottom:14px}
 .convoy{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:32px}
 .agent{display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:.78rem;transition:border-color .15s;text-decoration:none;color:var(--text)}
-.agent:hover{border-color:#333}
+.agent:hover{border-color:#333;border-image:linear-gradient(135deg,#FF6B2B,#FF2255,#FF00D4,#7800FF,#3E84FF,#00D6FF) 1}
 .agent-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;box-shadow:0 0 6px currentColor}
 .products{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:32px}
 .product{display:flex;align-items:center;gap:10px;padding:12px 14px;background:var(--card);border:1px solid var(--border);border-radius:8px;text-decoration:none;color:var(--text);transition:all .15s}
-.product:hover{border-color:#222;transform:translateY(-1px)}
+.product:hover{border-color:#333;border-image:linear-gradient(135deg,#FF6B2B,#FF00D4,#3E84FF) 1;transform:translateY(-1px)}
 .product-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;background:var(--grad)}
 .product-name{font-weight:600;font-size:.85rem}
 .product-url{font-size:.65rem;color:var(--sub);font-family:'JetBrains Mono',monospace}
