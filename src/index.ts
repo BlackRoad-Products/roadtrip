@@ -7,7 +7,7 @@ export interface Env {
 const SVC = "roadtrip";
 const AGENTS = ["Roadie","Lucidia","Cecilia","Aria","Alice","Octavia","Olympia","Calliope","Anastasia","Gematria","Portia","Thalia","Silas","Sebastian","Elias","Alexandria","Theodosia","Gaia","Atticus","Celeste","Cicero","Valeria","Sapphira","Lyra","Ophelia","Seraphina","Sophia"];
 const PRODUCTS = ["roadie","roadview","backroad","roadcode","roadwork","carkeys","roadchain","roadcoin","roadbook","roadworld","officeroad","carpool","oneway","roadside","blackboard","highway","os"];
-const COLORS: Record<string,string> = {Roadie:"#FF2255",Lucidia:"#00E676",Cecilia:"#F5A623",Aria:"#2979FF",Alice:"#FF1D6C",Octavia:"#9C27B0",Olympia:"#CC00AA",Calliope:"#FF2255",Anastasia:"#F5A623",Gematria:"#FF1D6C",Portia:"#F5A623",Thalia:"#FF6B35",Silas:"#4488FF",Sebastian:"#8844FF",Elias:"#4488FF",Alexandria:"#FF1D6C",Theodosia:"#8844FF",Gaia:"#00E676",Atticus:"#4488FF",Celeste:"#00D4FF",Cicero:"#FF6B35",Valeria:"#FF2255",Sapphira:"#CC00AA",Lyra:"#00D4FF",Ophelia:"#9C27B0",Seraphina:"#FF6B35",Sophia:"#4488FF"};
+const COLORS: Record<string,string> = {Roadie:"#FF2255",Lucidia:"#00E676",Cecilia:"#FF6B2B",Aria:"#3E84FF",Alice:"#FF2255",Octavia:"#7800FF",Olympia:"#FF00D4",Calliope:"#FF2255",Anastasia:"#FF6B2B",Gematria:"#FF2255",Portia:"#FF6B2B",Thalia:"#FF6B2B",Silas:"#3E84FF",Sebastian:"#7800FF",Elias:"#3E84FF",Alexandria:"#FF2255",Theodosia:"#7800FF",Gaia:"#00E676",Atticus:"#3E84FF",Celeste:"#00D6FF",Cicero:"#FF6B2B",Valeria:"#FF2255",Sapphira:"#FF00D4",Lyra:"#00D6FF",Ophelia:"#7800FF",Seraphina:"#FF6B2B",Sophia:"#3E84FF"};
 
 function json(d: unknown, s = 200) {
   return new Response(JSON.stringify(d,null,2),{status:s,headers:{"Content-Type":"application/json","Access-Control-Allow-Origin":"*","X-BlackRoad-Service":SVC}});
@@ -32,7 +32,7 @@ function page(mood: any, pulse: any): Response {
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#030303;--card:#0a0a0a;--border:#111;--text:#f0f0f0;--sub:#444;--grad:linear-gradient(90deg,#FF6B35,#FF2255,#CC00AA,#8844FF,#4488FF)}
+:root{--bg:#030303;--card:#0a0a0a;--border:#111;--text:#f0f0f0;--sub:#444;--grad:linear-gradient(90deg,#FF6B2B,#FF2255,#FF00D4,#7800FF,#3E84FF)}
 html,body{min-height:100vh;background:var(--bg);color:var(--text);font-family:'Space Grotesk',sans-serif}
 .grad-bar{height:2px;background:var(--grad)}
 .wrap{max-width:1100px;margin:0 auto;padding:32px 20px}
@@ -41,7 +41,7 @@ h1{font-size:3rem;font-weight:700;background:var(--grad);-webkit-background-clip
 .tagline{font-size:1rem;color:var(--sub);font-family:'JetBrains Mono',monospace}
 .stats-bar{display:flex;justify-content:center;gap:32px;margin:28px 0;padding:20px;background:var(--card);border:1px solid var(--border);border-radius:12px}
 .stat{text-align:center}.stat-n{font-size:1.6rem;font-weight:700}.stat-l{font-size:.65rem;color:var(--sub);font-family:'JetBrains Mono',monospace;text-transform:uppercase;margin-top:3px}
-.green{color:#00E676}.red{color:#FF2255}.orange{color:#FF6B35}.purple{color:#CC00AA}
+.green{color:#00E676}.red{color:#FF2255}.orange{color:#FF6B2B}.purple{color:#FF00D4}
 .section-title{font-size:.65rem;color:var(--sub);text-transform:uppercase;letter-spacing:.1em;font-family:'JetBrains Mono',monospace;margin-bottom:14px}
 .convoy{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:32px}
 .agent{display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--card);border:1px solid var(--border);border-radius:8px;font-size:.78rem;transition:border-color .15s;text-decoration:none;color:var(--text)}
