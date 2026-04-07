@@ -1,18 +1,22 @@
 name = "roadtrip-blackroad"
-main = "src/worker.js"
-compatibility_date = "2026-03-31"
-
-[ai]
-binding = "AI"
-
-[[d1_databases]]
-binding = "DB"
-database_name = "blackroad-chat"
-database_id = "ec4efdfb-a76e-46fb-a821-1278e17e7b90"
-
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
 [[routes]]
 pattern = "roadtrip.blackroad.io/*"
 zone_name = "blackroad.io"
+[vars]
+ENVIRONMENT = "production"
+SERVICE_NAME = "roadtrip"
+VERSION = "2.0.0"
+[[kv_namespaces]]
+binding = "STORE"
+id = "e16ec8d299e943d8928311172d4da8f4"
+[[d1_databases]]
+binding = "DB"
+database_name = "blackroad-os-main"
+database_id = "e2c6dcd9-c21a-48ac-8807-7b3a6881c4f7"
 
-[triggers]
-crons = ["*/5 * * * *"]
+[[migrations]]
+tag = "v2"
+deleted_classes = ["ChatRoom"]
