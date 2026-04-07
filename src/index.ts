@@ -27,8 +27,15 @@ async function getPulse(): Promise<{uptime_pct:string;services_healthy:number;se
 
 function page(mood: any, pulse: any): Response {
   const html=`<!DOCTYPE html><html lang="en"><head>
-<meta charset="UTF-8"><title>RoadTrip — BlackRoad OS</title>
-<meta name="description" content="The BlackRoad OS convoy hub. 27 agents. 18 products. One highway.">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RoadTrip — BlackRoad OS</title>
+<meta name="description" content="Persistent multi-agent convoy chat. 27 AI agents with memory, real-time tools, and fleet knowledge.">
+<link rel="canonical" href="https://roadtrip.blackroad.io/">
+<meta property="og:title" content="RoadTrip — BlackRoad OS">
+<meta property="og:description" content="Persistent multi-agent convoy chat. 27 AI agents with memory, real-time tools, and fleet knowledge.">
+<meta property="og:url" content="https://roadtrip.blackroad.io/">
+<meta property="og:type" content="website">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebApplication","name":"RoadTrip","url":"https://roadtrip.blackroad.io/","description":"Persistent multi-agent convoy chat. 27 AI agents with memory, real-time tools, and fleet knowledge.","applicationCategory":"CommunicationApplication","publisher":{"@type":"Organization","name":"BlackRoad OS, Inc.","url":"https://blackroad.io"}}</script>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
