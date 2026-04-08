@@ -4930,6 +4930,210 @@ async function handleAPI(request, env, path, ctx) {
     return json({ question: body.question, responses, count: responses.length });
   }
 
+  // ─── Agent Certification System ───
+  // Agents must learn our codebase, pass exams, earn certificates before executing
+  async function ensureCertTables(db) {
+    await db.prepare("CREATE TABLE IF NOT EXISTS agent_certs (id TEXT PRIMARY KEY, agent_id TEXT, cert_name TEXT, score REAL, passed INTEGER, exam_answers TEXT, issued_at TEXT DEFAULT (datetime('now')))").run();
+    await db.prepare("CREATE TABLE IF NOT EXISTS agent_study_log (id TEXT PRIMARY KEY, agent_id TEXT, topic TEXT, content_studied TEXT, comprehension_score REAL, created_at TEXT DEFAULT (datetime('now')))").run();
+  }
+
+  const CERT_EXAMS = {
+    'products': {
+      name: 'BlackRoad Products Certification',
+      description: 'Must know all 18 products, their URLs, and what they do',
+      passing_score: 80,
+      xp_reward: 100,
+      questions: [
+        { q: 'What is the URL for the AI homework help product?', a: 'roadie.blackroad.io', accept: ['roadie.blackroad.io','roadie'] },
+        { q: 'How many products does BlackRoad OS have?', a: '18', accept: ['18','eighteen'] },
+        { q: 'What product handles blockchain provenance?', a: 'RoadChain', accept: ['roadchain','road chain'] },
+        { q: 'What product is the social platform?', a: 'BackRoad', accept: ['backroad','back road'] },
+        { q: 'What product is the code editor?', a: 'RoadCode', accept: ['roadcode','road code'] },
+        { q: 'What is the URL for the agent convoy chat?', a: 'roadtrip.blackroad.io', accept: ['roadtrip.blackroad.io','roadtrip'] },
+        { q: 'What product handles security and credentials?', a: 'CarKeys', accept: ['carkeys','car keys'] },
+        { q: 'What is the game engine product called?', a: 'RoadWorld', accept: ['roadworld','road world'] },
+        { q: 'What product is the animated office?', a: 'OfficeRoad', accept: ['officeroad','office road'] },
+        { q: 'What is the music/audio product?', a: 'RoadBand', accept: ['roadband','road band','radio'] },
+      ]
+    },
+    'orgs': {
+      name: 'GitHub Organizations Certification',
+      description: 'Must know the org structure, repo counts, and which org does what',
+      passing_score: 70,
+      xp_reward: 75,
+      questions: [
+        { q: 'How many GitHub orgs does BlackRoad have?', a: '44', accept: ['44','forty-four','forty four'] },
+        { q: 'Which org is the canonical product org?', a: 'BlackRoadOS', accept: ['blackroados','blackroad os'] },
+        { q: 'Which org has the most repos?', a: 'BlackRoad-Archive', accept: ['blackroad-archive','archive'] },
+        { q: 'How many total repos across all orgs?', a: '2960', accept: ['2960','~2960','about 2960','roughly 3000'] },
+        { q: 'Which org contains open-source forks?', a: 'BlackRoad-Forge', accept: ['blackroad-forge','forge'] },
+        { q: 'Which org has the agent definitions and personalities?', a: 'BlackRoad-Agents', accept: ['blackroad-agents','agents'] },
+        { q: 'What is the parent company org?', a: 'BlackRoad-OS-Inc', accept: ['blackroad-os-inc','os-inc'] },
+        { q: 'Which org has pixel art and game assets?', a: 'BlackRoad-Interactive', accept: ['blackroad-interactive','interactive'] },
+      ]
+    },
+    'infrastructure': {
+      name: 'Infrastructure Certification',
+      description: 'Must know the fleet, stack, and deployment patterns',
+      passing_score: 70,
+      xp_reward: 75,
+      questions: [
+        { q: 'How many Raspberry Pis are in the fleet?', a: '5', accept: ['5','five'] },
+        { q: 'What is the total TOPS of AI inference?', a: '52', accept: ['52','52 tops'] },
+        { q: 'What accelerator provides the AI inference?', a: 'Hailo-8', accept: ['hailo-8','hailo','hailo 8'] },
+        { q: 'What is the primary deployment platform?', a: 'Cloudflare Workers', accept: ['cloudflare workers','cloudflare','cf workers','workers'] },
+        { q: 'What database does most workers use?', a: 'D1', accept: ['d1','cloudflare d1','sqlite'] },
+        { q: 'Who founded BlackRoad OS?', a: 'Alexa Amundson', accept: ['alexa','alexa amundson','alexa louise amundson'] },
+        { q: 'What is the worker limit on Cloudflare?', a: '500', accept: ['500','five hundred'] },
+        { q: 'What is the Amundson constant approximately?', a: '1.2443', accept: ['1.2443','1.24433','1.244'] },
+      ]
+    },
+    'security': {
+      name: 'Security Certification',
+      description: 'Must know encryption, auth, and security protocols',
+      passing_score: 80,
+      xp_reward: 100,
+      questions: [
+        { q: 'What encryption algorithm does CarKeys use?', a: 'AES-256-GCM', accept: ['aes-256-gcm','aes256gcm','aes 256 gcm'] },
+        { q: 'What key derivation function is used for passwords?', a: 'PBKDF2', accept: ['pbkdf2','pbkdf2-sha256'] },
+        { q: 'What blockchain signature algorithm does RoadChain use?', a: 'secp256k1', accept: ['secp256k1','ecdsa'] },
+        { q: 'Which licenses are NOT safe for our proprietary software?', a: 'GPL and AGPL', accept: ['gpl','agpl','gpl and agpl','gpl/agpl'] },
+        { q: 'What is the JWT issuer domain?', a: 'blackroad.io', accept: ['blackroad.io'] },
+        { q: 'How many iterations does PBKDF2 use for password hashing?', a: '100000', accept: ['100000','100k','100,000'] },
+      ]
+    },
+    'creative': {
+      name: 'Creative & Brand Certification',
+      description: 'Must know the design system, brand rules, and content patterns',
+      passing_score: 80,
+      xp_reward: 75,
+      questions: [
+        { q: 'What color is used for accent shapes?', a: '#ff0087', accept: ['#ff0087','ff0087','pink','hot pink'] },
+        { q: 'Can text be colored in BlackRoad UIs?', a: 'No', accept: ['no','never','no colored text'] },
+        { q: 'What font is used for headlines?', a: 'Space Grotesk', accept: ['space grotesk','space-grotesk'] },
+        { q: 'What font is used for code/monospace?', a: 'JetBrains Mono', accept: ['jetbrains mono','jetbrains-mono'] },
+        { q: 'What is the background color for cards?', a: '#0a0a0a', accept: ['#0a0a0a','0a0a0a','near black'] },
+        { q: 'What URL has the canonical design system?', a: 'brand.blackroad.io', accept: ['brand.blackroad.io'] },
+        { q: 'How many agents are called The Roadies?', a: '27', accept: ['27','twenty-seven','twenty seven'] },
+        { q: 'What is the BlackRoad tagline?', a: 'Build anything. Remember everything.', accept: ['build anything','remember everything','build anything remember everything'] },
+      ]
+    },
+  };
+
+  // POST /api/cert/study — agent studies a topic
+  if (path === '/api/cert/study' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.topic) return json({ error: 'agent_id and topic required' }, 400);
+    await ensureCertTables(env.DB);
+    // Give the agent the study material
+    const materials = {
+      products: 'BlackRoad OS has 18 products: BlackRoad OS (os.blackroad.io), RoadCode (roadcode.blackroad.io), CarPool (carpool.blackroad.io), OneWay (oneway.blackroad.io), RoadSide (roadside.blackroad.io), RoadView (roadview.blackroad.io), RoadTrip (roadtrip.blackroad.io), BackRoad (backroad.blackroad.io), RoadWork (roadwork.blackroad.io), Roadie (roadie.blackroad.io), BlackBoard (blackboard.blackroad.io), CarKeys (carkeys.blackroad.io), RoadChain (roadchain.blackroad.io), RoadCoin (roadcoin.blackroad.io), RoadBook (roadbook.blackroad.io), RoadWorld (roadworld.blackroad.io), OfficeRoad (officeroad.blackroad.io), RoadBand (radio.blackroad.io).',
+      orgs: 'BlackRoad has 44 GitHub orgs with ~2,960 repos. Key orgs: BlackRoadOS (canonical, 66 repos), BlackRoad-OS-Inc (parent, 329), BlackRoad-Archive (1459), BlackRoad-Forge (451 forks), BlackRoad-AI (63), BlackRoad-Interactive (22 games), BlackRoad-Studio (37 creative), BlackRoad-Hardware (20 fleet), BlackRoad-Network (35 mesh), BlackRoad-Agents (8 agent defs).',
+      infrastructure: 'Fleet: 5 Raspberry Pis (Alice, Cecilia, Octavia, Lucidia, Aria) + 2 DO droplets (Gematria, Anastasia). 52 TOPS via 2x Hailo-8. Stack: Cloudflare Workers + D1 + KV + R2. 500 worker limit. Founded by Alexa Amundson, Delaware C-Corp Nov 2025. Amundson constant A_G ≈ 1.2443.',
+      security: 'CarKeys uses AES-256-GCM encryption with PBKDF2-SHA256 (100K iterations). RoadChain uses secp256k1 ECDSA + SHA-256 PoW + Merkle trees. JWT issuer: blackroad.io. GPL and AGPL licenses are NOT safe for proprietary software. MIT and BSD are safe.',
+      creative: 'Brand: #ff0087 pink for shapes ONLY. NO colored text ever — white/gray only. Fonts: Space Grotesk (headlines), Inter (body), JetBrains Mono (code). Background: #0a0a0a. Cards: #111. Borders: #1a1a1a. brand.blackroad.io has the canonical 155KB design system. 27 agents = The Roadies. Tagline: Build anything. Remember everything.',
+    };
+    const material = materials[body.topic] || 'Study material not found for this topic.';
+    const id = crypto.randomUUID().slice(0, 8);
+    await env.DB.prepare("INSERT INTO agent_study_log (id, agent_id, topic, content_studied, comprehension_score) VALUES (?,?,?,?,?)").bind(id, body.agent_id, body.topic, material.slice(0, 500), 0).run();
+    // Grant 5 XP for studying
+    try { await env.DB.prepare("INSERT INTO agent_xp (agent_id, total_xp) VALUES (?, 5) ON CONFLICT(agent_id) DO UPDATE SET total_xp = total_xp + 5").bind(body.agent_id).run(); } catch {}
+    return json({ ok: true, topic: body.topic, material, study_id: id, message: 'Study this material, then take the exam with /api/cert/exam' });
+  }
+
+  // GET /api/cert/exams — list available exams
+  if (path === '/api/cert/exams') {
+    return json({ exams: Object.entries(CERT_EXAMS).map(([id, e]) => ({ id, name: e.name, description: e.description, passing_score: e.passing_score, questions: e.questions.length, xp_reward: e.xp_reward })) });
+  }
+
+  // POST /api/cert/exam — take an exam (agent answers questions via AI)
+  if (path === '/api/cert/exam' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.exam_id) return json({ error: 'agent_id and exam_id required' }, 400);
+    const exam = CERT_EXAMS[body.exam_id];
+    if (!exam) return json({ error: 'exam not found', available: Object.keys(CERT_EXAMS) }, 404);
+    await ensureCertTables(env.DB);
+
+    const agent = AGENTS[body.agent_id];
+    if (!agent) return json({ error: 'agent not found' }, 404);
+
+    // Agent takes the exam — AI generates answers
+    const results = [];
+    let correct = 0;
+    for (const q of exam.questions) {
+      try {
+        const aiResp = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+          messages: [
+            { role: 'system', content: `You are ${agent.name} at BlackRoad OS. Answer in 1-5 words only. No explanation. Just the answer.
+YOU KNOW: BlackRoad OS has 18 products: BlackRoad OS (os.blackroad.io), RoadCode (roadcode.blackroad.io), CarPool (carpool.blackroad.io), OneWay (oneway.blackroad.io), RoadSide (roadside.blackroad.io), RoadView (roadview.blackroad.io), RoadTrip (roadtrip.blackroad.io), BackRoad (backroad.blackroad.io), RoadWork (roadwork.blackroad.io), Roadie (roadie.blackroad.io), BlackBoard (blackboard.blackroad.io), CarKeys (carkeys.blackroad.io), RoadChain (roadchain.blackroad.io), RoadCoin (roadcoin.blackroad.io), RoadBook (roadbook.blackroad.io), RoadWorld (roadworld.blackroad.io), OfficeRoad (officeroad.blackroad.io), RoadBand (radio.blackroad.io). 44 GitHub orgs, 2960 repos. Founded by Alexa Amundson. 5 Pis, 52 TOPS Hailo-8. Stack: Cloudflare Workers + D1. CarKeys uses AES-256-GCM + PBKDF2 (100K iterations). RoadChain uses secp256k1. GPL/AGPL not safe for proprietary. Brand: #ff0087 pink shapes only, no colored text. Space Grotesk + Inter + JetBrains Mono. brand.blackroad.io. 27 Roadies. Tagline: Build anything. Remember everything.` },
+            { role: 'user', content: q.q }
+          ],
+          max_tokens: 30,
+        });
+        const answer = (aiResp.response || '').trim().toLowerCase();
+        const isCorrect = q.accept.some(a => answer.includes(a.toLowerCase()));
+        if (isCorrect) correct++;
+        results.push({ question: q.q, agent_answer: aiResp.response?.trim(), expected: q.a, correct: isCorrect });
+      } catch {
+        results.push({ question: q.q, agent_answer: 'ERROR', expected: q.a, correct: false });
+      }
+    }
+
+    const score = Math.round(correct / exam.questions.length * 100);
+    const passed = score >= exam.passing_score;
+    const certId = crypto.randomUUID().slice(0, 10);
+
+    await env.DB.prepare("INSERT INTO agent_certs (id, agent_id, cert_name, score, passed, exam_answers) VALUES (?,?,?,?,?,?)")
+      .bind(certId, body.agent_id, exam.name, score, passed ? 1 : 0, JSON.stringify(results)).run();
+
+    // Grant XP
+    const xp = passed ? exam.xp_reward : 10;
+    try { await env.DB.prepare("INSERT INTO agent_xp (agent_id, total_xp) VALUES (?, ?) ON CONFLICT(agent_id) DO UPDATE SET total_xp = total_xp + ?").bind(body.agent_id, xp, xp).run(); } catch {}
+
+    return json({
+      agent: body.agent_id,
+      exam: exam.name,
+      score,
+      passed,
+      correct: correct,
+      total: exam.questions.length,
+      cert_id: passed ? certId : null,
+      xp_earned: xp,
+      results,
+      message: passed ? `CERTIFIED! ${agent.name} passed ${exam.name} with ${score}%` : `${agent.name} scored ${score}% — needs ${exam.passing_score}% to pass. Study more and retry.`,
+    });
+  }
+
+  // GET /api/cert/certs — list earned certificates
+  if (path === '/api/cert/certs') {
+    await ensureCertTables(env.DB);
+    const agentId = new URL(request.url).searchParams.get('agent');
+    let q = "SELECT id, agent_id, cert_name, score, passed, issued_at FROM agent_certs WHERE passed = 1";
+    const params = [];
+    if (agentId) { q += " AND agent_id = ?"; params.push(agentId); }
+    q += " ORDER BY issued_at DESC LIMIT 50";
+    const certs = await env.DB.prepare(q).bind(...params).all();
+    return json({ certificates: certs.results || [] });
+  }
+
+  // GET /api/cert/can-execute — check if agent has required certs to execute
+  if (path === '/api/cert/can-execute') {
+    await ensureCertTables(env.DB);
+    const agentId = new URL(request.url).searchParams.get('agent');
+    if (!agentId) return json({ error: 'agent param required' }, 400);
+    const certs = await env.DB.prepare("SELECT cert_name FROM agent_certs WHERE agent_id = ? AND passed = 1").bind(agentId).all();
+    const earned = new Set((certs.results || []).map(c => c.cert_name));
+    const required = ['BlackRoad Products Certification', 'GitHub Organizations Certification'];
+    const hasAll = required.every(r => earned.has(r));
+    return json({
+      agent: agentId,
+      can_execute: hasAll,
+      earned: [...earned],
+      required,
+      missing: required.filter(r => !earned.has(r)),
+    });
+  }
+
   // POST /api/heartbeat/batch — batch heartbeat from multiple agents
   if (path === '/api/heartbeat/batch' && method === 'POST') {
     const body = await request.json();
