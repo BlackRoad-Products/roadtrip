@@ -4545,6 +4545,96 @@ async function handleAPI(request, env, path, ctx) {
     return json({ agent: body.agent_id, claim: body.claim, contradictions, has_contradiction: contradictions.length > 0 });
   }
 
+  // ─── Orchestrator APIs (intent, pipeline, supervisor) ───
+  async function ensureOrchestratorTables(db) {
+    await db.batch([
+      db.prepare(`CREATE TABLE IF NOT EXISTS agent_intents (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT, status TEXT DEFAULT 'declared', expires_at TEXT, claimed_by TEXT, created_at TEXT DEFAULT (datetime('now')))`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS pipelines (id TEXT PRIMARY KEY, name TEXT, status TEXT DEFAULT 'pending', current_step INTEGER DEFAULT 0, total_steps INTEGER, created_at TEXT DEFAULT (datetime('now')), completed_at TEXT)`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS pipeline_steps (id TEXT PRIMARY KEY, pipeline_id TEXT NOT NULL, step_index INTEGER, agent_id TEXT, action TEXT, input TEXT, output TEXT, status TEXT DEFAULT 'pending', started_at TEXT, completed_at TEXT)`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS agent_heartbeats (agent_id TEXT PRIMARY KEY, last_seen TEXT DEFAULT (datetime('now')), status TEXT DEFAULT 'online', current_task TEXT)`)
+    ]);
+  }
+
+  // POST /api/intents — declare intent before acting
+  if (path === '/api/intents' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.action) return json({ error: 'agent_id and action required' }, 400);
+    await ensureOrchestratorTables(env.DB);
+    const id = crypto.randomUUID().slice(0,12);
+    const expiresAt = new Date(Date.now() + (body.expires_in_seconds || 300) * 1000).toISOString();
+    await env.DB.prepare('INSERT INTO agent_intents (id, agent_id, action, target, expires_at) VALUES (?,?,?,?,?)').bind(id, body.agent_id, body.action, body.target || null, expiresAt).run();
+    return json({ ok: true, intent_id: id, expires_at: expiresAt });
+  }
+  // GET /api/intents — list active intents
+  if (path === '/api/intents' && method === 'GET') {
+    await ensureOrchestratorTables(env.DB);
+    await env.DB.prepare("DELETE FROM agent_intents WHERE expires_at < datetime('now') AND status = 'declared'").run();
+    const intents = await env.DB.prepare("SELECT * FROM agent_intents WHERE status IN ('declared','claimed') ORDER BY created_at DESC LIMIT 50").all();
+    return json({ intents: intents.results || [] });
+  }
+  // POST /api/intents/claim — claim an intent (prevents duplicates)
+  if (path === '/api/intents/claim' && method === 'POST') {
+    const body = await request.json();
+    if (!body.intent_id || !body.claimed_by) return json({ error: 'intent_id and claimed_by required' }, 400);
+    await ensureOrchestratorTables(env.DB);
+    const intent = await env.DB.prepare('SELECT * FROM agent_intents WHERE id = ?').bind(body.intent_id).first();
+    if (!intent) return json({ error: 'intent not found' }, 404);
+    if (intent.status === 'claimed') return json({ error: 'already claimed', claimed_by: intent.claimed_by }, 409);
+    await env.DB.prepare("UPDATE agent_intents SET status = 'claimed', claimed_by = ? WHERE id = ?").bind(body.claimed_by, body.intent_id).run();
+    return json({ ok: true, intent_id: body.intent_id, claimed_by: body.claimed_by });
+  }
+
+  // POST /api/pipeline — create a multi-step pipeline
+  if (path === '/api/pipeline' && method === 'POST') {
+    const body = await request.json();
+    if (!body.steps || !Array.isArray(body.steps)) return json({ error: 'steps[] required' }, 400);
+    await ensureOrchestratorTables(env.DB);
+    const pipeId = crypto.randomUUID().slice(0,12);
+    await env.DB.prepare("INSERT INTO pipelines (id, name, total_steps) VALUES (?,?,?)").bind(pipeId, body.name || 'unnamed', body.steps.length).run();
+    for (let i = 0; i < body.steps.length; i++) {
+      const s = body.steps[i];
+      await env.DB.prepare("INSERT INTO pipeline_steps (id, pipeline_id, step_index, agent_id, action, input) VALUES (?,?,?,?,?,?)").bind(crypto.randomUUID().slice(0,12), pipeId, i, s.agent || 'roadie', s.action || '', JSON.stringify(s.input || {})).run();
+    }
+    return json({ ok: true, pipeline_id: pipeId, steps: body.steps.length });
+  }
+  // GET /api/pipeline/:id
+  if (path.startsWith('/api/pipeline/') && method === 'GET') {
+    const pipeId = path.split('/')[3];
+    await ensureOrchestratorTables(env.DB);
+    const pipe = await env.DB.prepare('SELECT * FROM pipelines WHERE id = ?').bind(pipeId).first();
+    if (!pipe) return json({ error: 'pipeline not found' }, 404);
+    const steps = await env.DB.prepare('SELECT * FROM pipeline_steps WHERE pipeline_id = ? ORDER BY step_index').bind(pipeId).all();
+    return json({ pipeline: pipe, steps: steps.results || [] });
+  }
+
+  // GET /api/supervisor — agent health overview
+  if (path === '/api/supervisor') {
+    await ensureOrchestratorTables(env.DB);
+    // Update heartbeats from agent_status table
+    const statuses = await env.DB.prepare("SELECT agent_id, status, last_seen FROM agent_status ORDER BY last_seen DESC").all();
+    const now = Date.now();
+    const agents = (statuses.results || []).map(a => {
+      const lastMs = new Date(a.last_seen || 0).getTime();
+      const ageMin = (now - lastMs) / 60000;
+      return { agent: a.agent_id, status: a.status, last_seen: a.last_seen, age_minutes: Math.round(ageMin), health: ageMin < 5 ? 'healthy' : ageMin < 30 ? 'idle' : 'offline' };
+    });
+    const healthy = agents.filter(a => a.health === 'healthy').length;
+    const idle = agents.filter(a => a.health === 'idle').length;
+    const offline = agents.filter(a => a.health === 'offline').length;
+    return json({ total: agents.length, healthy, idle, offline, agents });
+  }
+
+  // POST /api/heartbeat/batch — batch heartbeat from multiple agents
+  if (path === '/api/heartbeat/batch' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agents || !Array.isArray(body.agents)) return json({ error: 'agents[] required' }, 400);
+    await ensureOrchestratorTables(env.DB);
+    for (const a of body.agents) {
+      await env.DB.prepare("INSERT OR REPLACE INTO agent_heartbeats (agent_id, last_seen, status, current_task) VALUES (?,datetime('now'),?,?)").bind(a.agent_id, a.status || 'online', a.task || null).run();
+    }
+    return json({ ok: true, count: body.agents.length });
+  }
+
   // ─── Memory 2048 APIs ───
   if (path === '/api/memory/2048/store' && method === 'POST') {
     const body = await request.json();
