@@ -8237,6 +8237,14 @@ export default {
     if (path === '/robots.txt') return new Response('User-agent: *\nAllow: /\nSitemap: https://roadtrip.blackroad.io/sitemap.xml\n\nUser-agent: GPTBot\nDisallow: /\n\nUser-agent: ChatGPT-User\nDisallow: /\n\nUser-agent: CCBot\nDisallow: /', { headers: { 'Content-Type': 'text/plain' } });
     if (path === '/sitemap.xml') return new Response(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://roadtrip.blackroad.io/</loc><lastmod>2026-04-05</lastmod><changefreq>daily</changefreq><priority>1.0</priority></url><url><loc>https://roadtrip.blackroad.io/api/agents</loc><lastmod>2026-04-05</lastmod><changefreq>weekly</changefreq><priority>0.8</priority></url></urlset>`, { headers: { 'Content-Type': 'application/xml' } });
 
+    // Voice chat UI (from KV)
+    if (path === '/voice') {
+      try {
+        const html = await env.STORE.get('roadtrip-voice', 'text');
+        if (html) return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+      } catch {}
+    }
+
     // Serve UI
     return new Response(renderUI(), {
       headers: { 'Content-Type': 'text/html;charset=utf-8', 'Content-Security-Policy': "frame-ancestors 'self' https://blackroad.io https://*.blackroad.io" },
