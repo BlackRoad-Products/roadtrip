@@ -106,19 +106,22 @@ ${PRODUCTS.map(p=>`<a class="product" href="https://${p}.blackroad.io" target="_
   return new Response(html,{headers:{"Content-Type":"text/html;charset=UTF-8"}});
 }
 
+// Import the full worker for API routes
+import worker from './worker.js';
+
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if(req.method==="OPTIONS")return new Response(null,{status:204,headers:{"Access-Control-Allow-Origin":"*"}});
     const url=new URL(req.url);
     const path=url.pathname;
     track(env,req,path);
-    if(path==="/health")return json({service:SVC,status:"ok",version:env.VERSION,ts:Date.now()});
-    if(path==="/api/agents")return json({agents:AGENTS,count:AGENTS.length,colors:COLORS});
-    if(path==="/api/products")return json({products:PRODUCTS.map(p=>({id:p,url:`https://${p}.blackroad.io`}))});
-    if(path==="/api/status"){
-      const [mood,pulse]=await Promise.all([getMood(),getPulse()]);
-      return json({mood,pulse,ts:Date.now()});
+
+    // Delegate ALL /api/* and /health routes to the full worker
+    if(path.startsWith('/api/') || path === '/health') {
+      return worker.fetch(req, env, ctx);
     }
+
+    // Landing page for everything else
     const [mood,pulse]=await Promise.all([getMood(),getPulse()]);
     return page(mood,pulse);
   }
