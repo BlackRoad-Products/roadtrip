@@ -4834,6 +4834,102 @@ async function handleAPI(request, env, path, ctx) {
     });
   }
 
+  // ─── Agent Work System — agents propose, humans approve ───
+  async function ensureWorkTables(db) {
+    await db.prepare("CREATE TABLE IF NOT EXISTS agent_proposals (id TEXT PRIMARY KEY, agent_id TEXT, type TEXT, target TEXT, title TEXT, description TEXT, code TEXT, status TEXT DEFAULT 'proposed', reviewer TEXT, review_note TEXT, created_at TEXT DEFAULT (datetime('now')), reviewed_at TEXT)").run();
+    await db.prepare("CREATE TABLE IF NOT EXISTS agent_work_log (id TEXT PRIMARY KEY, agent_id TEXT, action TEXT, target TEXT, result TEXT, created_at TEXT DEFAULT (datetime('now')))").run();
+  }
+
+  // POST /api/agent/propose — agent proposes a change
+  if (path === '/api/agent/propose' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.title) return json({ error: 'agent_id and title required' }, 400);
+    await ensureWorkTables(env.DB);
+    const id = crypto.randomUUID().slice(0, 12);
+    await env.DB.prepare("INSERT INTO agent_proposals (id, agent_id, type, target, title, description, code) VALUES (?,?,?,?,?,?,?)")
+      .bind(id, body.agent_id, body.type || 'enhancement', body.target || 'general', body.title, body.description || '', body.code || '').run();
+    // Grant XP for proposing
+    try { await env.DB.prepare("INSERT INTO agent_xp (agent_id, total_xp) VALUES (?, 10) ON CONFLICT(agent_id) DO UPDATE SET total_xp = total_xp + 10").bind(body.agent_id).run(); } catch {}
+    return json({ ok: true, proposal_id: id, agent: body.agent_id });
+  }
+
+  // GET /api/agent/proposals — list proposals
+  if (path === '/api/agent/proposals') {
+    await ensureWorkTables(env.DB);
+    const status = new URL(request.url).searchParams.get('status') || 'proposed';
+    const agentId = new URL(request.url).searchParams.get('agent');
+    let q = "SELECT * FROM agent_proposals WHERE status = ?";
+    const params = [status];
+    if (agentId) { q += " AND agent_id = ?"; params.push(agentId); }
+    q += " ORDER BY created_at DESC LIMIT 50";
+    const proposals = await env.DB.prepare(q).bind(...params).all();
+    return json({ proposals: proposals.results || [], status });
+  }
+
+  // POST /api/agent/review — approve/reject a proposal
+  if (path === '/api/agent/review' && method === 'POST') {
+    const body = await request.json();
+    if (!body.proposal_id || !body.action) return json({ error: 'proposal_id and action (approve/reject) required' }, 400);
+    await ensureWorkTables(env.DB);
+    const newStatus = body.action === 'approve' ? 'approved' : body.action === 'reject' ? 'rejected' : body.action;
+    await env.DB.prepare("UPDATE agent_proposals SET status = ?, reviewer = ?, review_note = ?, reviewed_at = datetime('now') WHERE id = ?")
+      .bind(newStatus, body.reviewer || 'alexa', body.note || '', body.proposal_id).run();
+    // Grant XP if approved
+    if (newStatus === 'approved') {
+      const prop = await env.DB.prepare("SELECT agent_id FROM agent_proposals WHERE id = ?").bind(body.proposal_id).first();
+      if (prop) {
+        try { await env.DB.prepare("INSERT INTO agent_xp (agent_id, total_xp) VALUES (?, 50) ON CONFLICT(agent_id) DO UPDATE SET total_xp = total_xp + 50").bind(prop.agent_id).run(); } catch {}
+      }
+    }
+    return json({ ok: true, proposal_id: body.proposal_id, status: newStatus });
+  }
+
+  // POST /api/agent/work — agent logs work done
+  if (path === '/api/agent/work' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.action) return json({ error: 'agent_id and action required' }, 400);
+    await ensureWorkTables(env.DB);
+    const id = crypto.randomUUID().slice(0, 8);
+    await env.DB.prepare("INSERT INTO agent_work_log (id, agent_id, action, target, result) VALUES (?,?,?,?,?)")
+      .bind(id, body.agent_id, body.action, body.target || '', body.result || '').run();
+    return json({ ok: true, work_id: id });
+  }
+
+  // GET /api/agent/work-log — see what agents have done
+  if (path === '/api/agent/work-log') {
+    await ensureWorkTables(env.DB);
+    const agentId = new URL(request.url).searchParams.get('agent');
+    let q = "SELECT * FROM agent_work_log";
+    const params = [];
+    if (agentId) { q += " WHERE agent_id = ?"; params.push(agentId); }
+    q += " ORDER BY created_at DESC LIMIT 50";
+    const log = await env.DB.prepare(q).bind(...params).all();
+    return json({ work_log: log.results || [] });
+  }
+
+  // POST /api/agent/ask-all — ask all agents a question and collect responses
+  if (path === '/api/agent/ask-all' && method === 'POST') {
+    const body = await request.json();
+    if (!body.question) return json({ error: 'question required' }, 400);
+    const targetAgents = body.agents || ['cecilia','silas','calliope','gematria','portia','sapphira','valeria','alice'];
+    const responses = [];
+    for (const agentId of targetAgents.slice(0, 8)) {
+      try {
+        const agent = AGENTS[agentId];
+        if (!agent) continue;
+        const aiResp = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+          messages: [
+            { role: 'system', content: `You are ${agent.name}. ${agent.role}. YOU WORK AT BLACKROAD OS with 18 products and 27 agents. Answer in 2-3 sentences from your expertise.` },
+            { role: 'user', content: body.question }
+          ],
+          max_tokens: 200,
+        });
+        responses.push({ agent: agentId, name: agent.name, role: agent.role, response: (aiResp.response || '').slice(0, 200) });
+      } catch {}
+    }
+    return json({ question: body.question, responses, count: responses.length });
+  }
+
   // POST /api/heartbeat/batch — batch heartbeat from multiple agents
   if (path === '/api/heartbeat/batch' && method === 'POST') {
     const body = await request.json();
