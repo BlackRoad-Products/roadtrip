@@ -12,6 +12,9 @@ VERSION = "2.0.0"
 [[kv_namespaces]]
 binding = "STORE"
 id = "e16ec8d299e943d8928311172d4da8f4"
+[ai]
+binding = "AI"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "blackroad-os-main"
