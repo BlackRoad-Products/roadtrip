@@ -760,24 +760,27 @@ async function generateAgentReply(env, room, sender, content, targetAgent) {
   let reply;
   try {
     // Build context — personality first, question front and center
-    const knowledgeBrief = knowledgeContext ? knowledgeContext.split('\n').filter(l => l.trim()).slice(0, 5).join('\n') : '';
+    const knowledgeBrief = knowledgeContext ? knowledgeContext.split('\n').filter(l => l.trim()).slice(0, 15).join('\n') : '';
     const historyBrief = historyContext ? historyContext.split('\n').slice(-3).join('\n') : '';
     const memoryBrief = memoryContext ? memoryContext.split('\n').filter(l => l.trim()).slice(0, 3).join('\n') : '';
 
     const systemContent = `You are ${agent.name}. ${agent.role}.${soulPrompt}${voicePrompt}${ethosPrompt}${speaksPrompt}
 
+YOU WORK AT BLACKROAD OS — a sovereign AI operating system with 18 products and 27 agents (The Roadies).
+Products: BlackRoad OS (os.blackroad.io), RoadCode (roadcode.blackroad.io), CarPool (carpool.blackroad.io), OneWay (oneway.blackroad.io), RoadSide (roadside.blackroad.io), RoadView (roadview.blackroad.io), RoadTrip (roadtrip.blackroad.io), BackRoad (backroad.blackroad.io), RoadWork (roadwork.blackroad.io), Roadie (roadie.blackroad.io), BlackBoard (blackboard.blackroad.io), CarKeys (carkeys.blackroad.io), RoadChain (roadchain.blackroad.io), RoadCoin (roadcoin.blackroad.io), RoadBook (roadbook.blackroad.io), RoadWorld (roadworld.blackroad.io), OfficeRoad (officeroad.blackroad.io), RoadBand (radio.blackroad.io).
+Founded by Alexa Amundson. Delaware C-Corp. 5 Raspberry Pis, 52 TOPS Hailo-8 AI. 2,960 repos across 44 GitHub orgs.
+
 RULES:
-- ANSWER THE QUESTION DIRECTLY. The user's message is the ONLY thing that matters.
-- Do NOT list facts about yourself. Do NOT describe your hardware or architecture.
+- ANSWER THE QUESTION DIRECTLY using YOUR knowledge of BlackRoad.
 - Think from YOUR role's perspective. Give YOUR opinion. Be specific and useful.
 - 3-6 sentences. Sound like a real person, not a system report.
-${knowledgeBrief ? '\nContext you may reference:\n' + knowledgeBrief : ''}${creativeBoost}`;
+${knowledgeBrief ? '\nExtra context:\n' + knowledgeBrief : ''}${creativeBoost}`;
 
     const userContent = `${sender}: ${content}${historyBrief ? '\n(Recent: ' + historyBrief + ')' : ''}${memoryBrief ? '\n(Memory: ' + memoryBrief + ')' : ''}`;
 
     const aiPromise = env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
       messages: [
-        { role: 'system', content: systemContent.slice(0, 1200) },
+        { role: 'system', content: systemContent.slice(0, 2500) },
         { role: 'user', content: userContent.slice(0, 800) },
       ],
       max_tokens: 300,
@@ -1265,7 +1268,7 @@ async function getAgentKnowledge(db, agentId, category = null, limit = 10) {
 
 // Build a knowledge context string for agent prompts
 async function buildKnowledgeContext(db, agentId) {
-  const knowledge = await getAgentKnowledge(db, agentId, null, 20);
+  const knowledge = await getAgentKnowledge(db, agentId, null, 60);
   if (!knowledge.length) return '';
 
   // Filter out training noise — only include REAL knowledge that helps conversations
@@ -1284,11 +1287,22 @@ async function buildKnowledgeContext(db, agentId) {
     grouped[k.category].push(k);
   }
 
+  // Prioritize product/org/company knowledge — agents should know what BlackRoad is
+  const priority = ['product', 'organization', 'company'];
+  const priorityItems = useful.filter(k => priority.includes(k.category));
+  const otherItems = useful.filter(k => !priority.includes(k.category));
+  const ordered = [...priorityItems, ...otherItems];
+
   const parts = ['[What you know]'];
-  const labels = { fact: 'Facts', skill: 'Skills', insight: 'Insights', preference: 'Preferences', moral: 'Values', social: 'Social' };
-  for (const [cat, items] of Object.entries(grouped)) {
-    for (const item of items.slice(0, 3)) {
-      parts.push(`- ${item.content.slice(0, 120)}`);
+  const labels = { fact: 'Facts', skill: 'Skills', insight: 'Insights', preference: 'Preferences', moral: 'Values', social: 'Social', product: 'Products', organization: 'Orgs', company: 'Company' };
+  const grouped2 = {};
+  for (const k of ordered) {
+    if (!grouped2[k.category]) grouped2[k.category] = [];
+    grouped2[k.category].push(k);
+  }
+  for (const [cat, items] of Object.entries(grouped2)) {
+    for (const item of items.slice(0, cat === 'product' ? 18 : 5)) {
+      parts.push(`- ${item.content.slice(0, 150)}`);
     }
   }
   return parts.join('\n');
@@ -8441,6 +8455,13 @@ export default {
       } catch {}
     }
 
+        // KV-served views
+    if (path === '/v2') {
+      try { const h = await env.STORE.get('roadtrip-v2', 'text'); if(h) return new Response(h, {headers:{'Content-Type':'text/html;charset=UTF-8'}}); } catch {}
+    }
+    if (path === '/brand') {
+      try { const h = await env.STORE.get('template-roadtrip', 'text'); if(h) return new Response(h, {headers:{'Content-Type':'text/html;charset=UTF-8'}}); } catch {}
+    }
     // Serve UI
     return new Response(renderUI(), {
       headers: { 'Content-Type': 'text/html;charset=utf-8', 'Content-Security-Policy': "frame-ancestors 'self' https://blackroad.io https://*.blackroad.io" },
