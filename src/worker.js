@@ -343,6 +343,58 @@ const AGENT_SKILLS = {
   anastasia:  ['disaster recovery','backup restoration','service repair','incident response','resilience','failover'],
 };
 
+// ─── SKILL SEEKERS — Pre-digested codebase knowledge per agent ───
+// Maps each Roadie to their relevant Skill Seeker skills (from ~/blackroad-skills/)
+// Skills are loaded from D1 agent_skills table, seeded via /api/skills/seed
+const AGENT_SKILL_MAP = {
+  lucidia:    ['operator', 'empire', 'blackroad-os'],
+  cecilia:    ['operator', 'roadwork'],
+  octavia:    ['operator', 'BlackRoad-Network', 'BlackRoad-Hardware'],
+  roadie:     ['roadtrip', 'roadie', 'roadside'],
+  alexandria: ['BlackRoad-Archive', 'amundson', 'BlackRoad-Labs'],
+  olympia:    ['operator', 'BlackRoad-Cloud', 'empire'],
+  calliope:   ['roadbook', 'backroad', 'BlackRoad-Media'],
+  portia:     ['roadwork', 'empire'],
+  thalia:     ['roadworld', 'officeroad', 'BlackRoad-Studio'],
+  anastasia:  ['operator', 'BlackRoad-Archive', 'BlackRoad-Hardware'],
+  gematria:   ['amundson', 'BlackRoad-Labs', 'BlackRoad-Forge'],
+  silas:      ['operator', 'BlackRoad-Security'],
+  sebastian:  ['empire', 'BlackRoad-Studio'],
+  valeria:    ['carkeys', 'BlackRoad-Security'],
+  alice:      ['roadside', 'roadie'],
+  celeste:    ['blackboard', 'BlackRoad-Archive'],
+  elias:      ['roadie', 'BlackRoad-Education'],
+  sophia:     ['empire', 'amundson'],
+  theodosia:  ['empire', 'BlackRoad-README'],
+  gaia:       ['operator', 'BlackRoad-Hardware', 'BlackRoad-Network'],
+  aria:       ['BlackRoad-Studio', 'officeroad'],
+  lyra:       ['BlackRoad-Studio', 'roadworld'],
+  sapphira:   ['BlackRoad-Studio', 'empire'],
+  seraphina:  ['BlackRoad-Studio', 'BlackRoad-Media'],
+  cicero:     ['backroad', 'roadtrip'],
+  ophelia:    ['roadbook', 'backroad'],
+  atticus:    ['operator', 'BlackRoad-Security'],
+};
+
+// Load skills for an agent from D1
+async function loadAgentSkills(db, agentId) {
+  try {
+    const rows = await db.prepare(
+      'SELECT skill_name, skill_content, patterns_summary, architecture, languages, files_analyzed FROM agent_skills WHERE agent_id = ? LIMIT 5'
+    ).bind(agentId).all();
+    const skills = (rows.results || []);
+    if (skills.length === 0) return '';
+    return '[Trained Skills]\n' + skills.map(s => {
+      let entry = `[${s.skill_name}] ${s.files_analyzed || 0} files analyzed`;
+      if (s.languages) entry += ` | Languages: ${s.languages}`;
+      if (s.architecture) entry += ` | Architecture: ${s.architecture}`;
+      if (s.patterns_summary) entry += ` | Patterns: ${s.patterns_summary}`;
+      entry += '\n' + (s.skill_content || '').slice(0, 500);
+      return entry;
+    }).join('\n\n');
+  } catch { return ''; }
+}
+
 const AGENT_TOPICS = {
   general: [
     'What if we gave new users a personality quiz on arrival and matched them with the agent whose style fits them best?',
@@ -557,8 +609,22 @@ async function ensureTables(db) {
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id, created_at DESC)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id, created_at DESC)`),
+    // Skill Seekers — pre-digested codebase knowledge loaded per agent
+    db.prepare(`CREATE TABLE IF NOT EXISTS agent_skills (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      skill_name TEXT NOT NULL,
+      skill_content TEXT NOT NULL,
+      patterns_summary TEXT,
+      architecture TEXT,
+      languages TEXT,
+      files_analyzed INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_skills_agent ON agent_skills(agent_id, skill_name)`),
     // Persistent knowledge base — survives across sessions, feeds into prompts
-    db.prepare(`CREATE TABLE IF NOT EXISTS agent_knowledge (
+    db.prepare(`CREATE TABLE IF NOT EXISTS agent_knowledge (`
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
       category TEXT NOT NULL DEFAULT 'fact',
@@ -740,6 +806,10 @@ async function generateAgentReply(env, room, sender, content, targetAgent) {
   let trainingProfile = '';
   try { trainingProfile = await getTrainingProfile(env.DB, responderId); } catch {}
 
+  // 2f. Load Skill Seekers knowledge — pre-digested codebase expertise
+  let skillsContext = '';
+  try { skillsContext = await loadAgentSkills(env.DB, responderId); } catch {}
+
   // 2e. Load room history for conversational context
   const recentMsgs = await getMessages(env.DB, room, 15);
   const historyContext = recentMsgs.map(m =>
@@ -754,6 +824,7 @@ async function generateAgentReply(env, room, sender, content, targetAgent) {
   const skillsStr = AGENT_SKILLS[responderId] ? `\nYour skills: ${AGENT_SKILLS[responderId].join(', ')}` : '';
   const knowledgeStr = knowledgeContext ? `\n${knowledgeContext}` : '';
   const trainingStr = trainingProfile ? `\n${trainingProfile}` : '';
+  const skillsStr2 = skillsContext ? `\n${skillsContext}` : '';
 
   // 5. Thinking phase — reason before responding
   let thinking = '';
@@ -774,7 +845,7 @@ RULES:
 - ANSWER THE QUESTION DIRECTLY using YOUR knowledge of BlackRoad.
 - Think from YOUR role's perspective. Give YOUR opinion. Be specific and useful.
 - 3-6 sentences. Sound like a real person, not a system report.
-${knowledgeBrief ? '\nExtra context:\n' + knowledgeBrief : ''}${creativeBoost}`;
+${skillsStr2 ? '\n' + skillsStr2 : ''}${knowledgeBrief ? '\nExtra context:\n' + knowledgeBrief : ''}${creativeBoost}`;
 
     const userContent = `${sender}: ${content}${historyBrief ? '\n(Recent: ' + historyBrief + ')' : ''}${memoryBrief ? '\n(Memory: ' + memoryBrief + ')' : ''}`;
 
@@ -4367,6 +4438,70 @@ async function handleAPI(request, env, path, ctx) {
       byAgent[row.agent_id].categories[row.category] = { count: row.c, avg_confidence: Math.round(row.avg_conf * 100) };
     }
     return json({ agents: byAgent });
+  }
+
+  // ─── Skill Seekers: seed, list, and manage agent skills ───
+
+  // GET /api/skills — list all loaded skills
+  if (path === '/api/skills' && method === 'GET') {
+    const db = env.DB;
+    try { await ensureTables(db); } catch {}
+    const rows = await db.prepare('SELECT agent_id, skill_name, files_analyzed, languages, architecture, created_at FROM agent_skills ORDER BY agent_id, skill_name').all();
+    const byAgent = {};
+    for (const r of (rows.results || [])) {
+      if (!byAgent[r.agent_id]) byAgent[r.agent_id] = [];
+      byAgent[r.agent_id].push({ skill: r.skill_name, files: r.files_analyzed, languages: r.languages, architecture: r.architecture, loaded: r.created_at });
+    }
+    return json({ skills: byAgent, total: (rows.results || []).length });
+  }
+
+  // POST /api/skills/seed — load a skill into an agent
+  // Body: { agent_id, skill_name, skill_content, patterns_summary, architecture, languages, files_analyzed }
+  if (path === '/api/skills/seed' && method === 'POST') {
+    const db = env.DB;
+    try { await ensureTables(db); } catch {}
+    const body = await request.json();
+    const { agent_id, skill_name, skill_content, patterns_summary, architecture, languages, files_analyzed } = body;
+    if (!agent_id || !skill_name || !skill_content) {
+      return json({ error: 'agent_id, skill_name, and skill_content required' }, 400);
+    }
+    const id = `${agent_id}-${skill_name}`;
+    await db.prepare(
+      `INSERT OR REPLACE INTO agent_skills (id, agent_id, skill_name, skill_content, patterns_summary, architecture, languages, files_analyzed, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    ).bind(id, agent_id, skill_name, skill_content.slice(0, 4000), patterns_summary || '', architecture || '', languages || '', files_analyzed || 0).run();
+    return json({ ok: true, loaded: { agent_id, skill_name, files_analyzed } });
+  }
+
+  // POST /api/skills/seed-all — auto-seed all agents from AGENT_SKILL_MAP
+  // Body: { skills: { "operator": { content, patterns, architecture, languages, files }, ... } }
+  if (path === '/api/skills/seed-all' && method === 'POST') {
+    const db = env.DB;
+    try { await ensureTables(db); } catch {}
+    const body = await request.json();
+    const skillsData = body.skills || {};
+    let seeded = 0;
+    for (const [agentId, skillNames] of Object.entries(AGENT_SKILL_MAP)) {
+      for (const skillName of skillNames) {
+        const data = skillsData[skillName];
+        if (!data) continue;
+        const id = `${agentId}-${skillName}`;
+        await db.prepare(
+          `INSERT OR REPLACE INTO agent_skills (id, agent_id, skill_name, skill_content, patterns_summary, architecture, languages, files_analyzed, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+        ).bind(id, agentId, skillName, (data.content || '').slice(0, 4000), data.patterns || '', data.architecture || '', data.languages || '', data.files || 0).run();
+        seeded++;
+      }
+    }
+    return json({ ok: true, seeded, agents: Object.keys(AGENT_SKILL_MAP).length });
+  }
+
+  // DELETE /api/skills/:agent_id — clear skills for an agent
+  if (path.startsWith('/api/skills/') && method === 'DELETE') {
+    const db = env.DB;
+    const agentId = path.split('/')[3];
+    await db.prepare('DELETE FROM agent_skills WHERE agent_id = ?').bind(agentId).run();
+    return json({ ok: true, cleared: agentId });
   }
 
   // Training history
