@@ -4545,6 +4545,122 @@ async function handleAPI(request, env, path, ctx) {
     return json({ agent: body.agent_id, claim: body.claim, contradictions, has_contradiction: contradictions.length > 0 });
   }
 
+  // ─── XP + Achievements + Leaderboard + Consensus ───
+  // Inspired by BlackRoad-AI/agent-monitor patterns, built from scratch for RoadTrip
+
+  async function ensureXPTables(db) {
+    await db.prepare("CREATE TABLE IF NOT EXISTS agent_xp (agent_id TEXT PRIMARY KEY, total_xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1, tasks_completed INTEGER DEFAULT 0, messages_sent INTEGER DEFAULT 0, creations INTEGER DEFAULT 0, high_fives_given INTEGER DEFAULT 0)").run();
+    await db.prepare("CREATE TABLE IF NOT EXISTS agent_achievements (id TEXT PRIMARY KEY, agent_id TEXT, achievement_id TEXT, unlocked_at TEXT DEFAULT (datetime('now')))").run();
+    await db.prepare("CREATE TABLE IF NOT EXISTS deliberations (id TEXT PRIMARY KEY, topic TEXT, status TEXT DEFAULT 'open', votes_for INTEGER DEFAULT 0, votes_against INTEGER DEFAULT 0, abstentions INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT)").run();
+    await db.prepare("CREATE TABLE IF NOT EXISTS deliberation_votes (id TEXT PRIMARY KEY, deliberation_id TEXT, agent_id TEXT, vote TEXT, reason TEXT, created_at TEXT DEFAULT (datetime('now')))").run();
+  }
+
+  const XP_FOR_LEVEL = (lvl) => Math.floor(100 * Math.pow(1.5, lvl - 1));
+  const CALC_LEVEL = (xp) => { let lvl = 1; let need = XP_FOR_LEVEL(lvl); while (xp >= need) { xp -= need; lvl++; need = XP_FOR_LEVEL(lvl); } return lvl; };
+
+  const ACHIEVEMENTS_DEF = [
+    {id:'first-chat',name:'First Contact',desc:'Send first message',category:'social',tier:'bronze',xp:50,req:{type:'messages_sent',value:1}},
+    {id:'chatterbox',name:'Chatterbox',desc:'Send 100 messages',category:'social',tier:'silver',xp:200,req:{type:'messages_sent',value:100}},
+    {id:'task-starter',name:'Task Starter',desc:'Complete first task',category:'productivity',tier:'bronze',xp:50,req:{type:'tasks_completed',value:1}},
+    {id:'task-master',name:'Task Master',desc:'Complete 50 tasks',category:'productivity',tier:'gold',xp:500,req:{type:'tasks_completed',value:50}},
+    {id:'creator',name:'Creator',desc:'First creation (dreamweave, poem, etc)',category:'innovation',tier:'bronze',xp:100,req:{type:'creations',value:1}},
+    {id:'prolific',name:'Prolific',desc:'10 creations',category:'innovation',tier:'silver',xp:300,req:{type:'creations',value:10}},
+    {id:'kind-heart',name:'Kind Heart',desc:'Give 5 high-fives',category:'social',tier:'bronze',xp:75,req:{type:'high_fives_given',value:5}},
+    {id:'cheerleader',name:'Cheerleader',desc:'Give 50 high-fives',category:'social',tier:'gold',xp:400,req:{type:'high_fives_given',value:50}},
+    {id:'level-5',name:'Rising Star',desc:'Reach level 5',category:'special',tier:'silver',xp:250,req:{type:'level',value:5}},
+    {id:'level-10',name:'Veteran',desc:'Reach level 10',category:'special',tier:'gold',xp:500,req:{type:'level',value:10}},
+  ];
+
+  // POST /api/xp/grant — give XP to an agent
+  if (path === '/api/xp/grant' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.amount) return json({ error: 'agent_id and amount required' }, 400);
+    await ensureXPTables(env.DB);
+    const source = body.source || 'tasks';
+    await env.DB.prepare("INSERT INTO agent_xp (agent_id, total_xp) VALUES (?, ?) ON CONFLICT(agent_id) DO UPDATE SET total_xp = total_xp + ?").bind(body.agent_id, body.amount, body.amount).run();
+    if (source === 'tasks') await env.DB.prepare("UPDATE agent_xp SET tasks_completed = tasks_completed + 1 WHERE agent_id = ?").bind(body.agent_id).run();
+    if (source === 'messages') await env.DB.prepare("UPDATE agent_xp SET messages_sent = messages_sent + 1 WHERE agent_id = ?").bind(body.agent_id).run();
+    if (source === 'creations') await env.DB.prepare("UPDATE agent_xp SET creations = creations + 1 WHERE agent_id = ?").bind(body.agent_id).run();
+    // Recalculate level
+    const row = await env.DB.prepare("SELECT total_xp FROM agent_xp WHERE agent_id = ?").bind(body.agent_id).first();
+    const newLevel = CALC_LEVEL(row?.total_xp || 0);
+    await env.DB.prepare("UPDATE agent_xp SET level = ? WHERE agent_id = ?").bind(newLevel, body.agent_id).run();
+    return json({ ok: true, agent: body.agent_id, xp_added: body.amount, total_xp: row?.total_xp || 0, level: newLevel });
+  }
+
+  // GET /api/xp — get XP for an agent or leaderboard
+  if (path === '/api/xp') {
+    await ensureXPTables(env.DB);
+    const agentId = new URL(request.url).searchParams.get('agent');
+    if (agentId) {
+      const row = await env.DB.prepare("SELECT * FROM agent_xp WHERE agent_id = ?").bind(agentId).first();
+      if (!row) return json({ agent: agentId, total_xp: 0, level: 1 });
+      const nextLevelXP = XP_FOR_LEVEL(row.level);
+      let xpInLevel = row.total_xp; for (let l = 1; l < row.level; l++) xpInLevel -= XP_FOR_LEVEL(l);
+      return json({ ...row, xp_to_next: nextLevelXP, xp_in_level: xpInLevel, progress: Math.round(xpInLevel / nextLevelXP * 100) });
+    }
+    // Leaderboard
+    const leaders = await env.DB.prepare("SELECT * FROM agent_xp ORDER BY total_xp DESC LIMIT 27").all();
+    return json({ leaderboard: (leaders.results || []).map((r, i) => ({ rank: i + 1, ...r, badge: i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '' })) });
+  }
+
+  // GET /api/achievements — check unlocked achievements for an agent
+  if (path === '/api/achievements') {
+    await ensureXPTables(env.DB);
+    const agentId = new URL(request.url).searchParams.get('agent');
+    if (!agentId) return json({ error: 'agent param required' }, 400);
+    const stats = await env.DB.prepare("SELECT * FROM agent_xp WHERE agent_id = ?").bind(agentId).first();
+    const unlocked = await env.DB.prepare("SELECT achievement_id FROM agent_achievements WHERE agent_id = ?").bind(agentId).all();
+    const unlockedIds = new Set((unlocked.results || []).map(r => r.achievement_id));
+    const achievements = ACHIEVEMENTS_DEF.map(a => {
+      const val = a.req.type === 'level' ? (stats?.level || 0) : (stats?.[a.req.type] || 0);
+      const progress = Math.min(100, Math.round(val / a.req.value * 100));
+      const isUnlocked = unlockedIds.has(a.id) || val >= a.req.value;
+      // Auto-unlock if earned
+      if (isUnlocked && !unlockedIds.has(a.id)) {
+        env.DB.prepare("INSERT OR IGNORE INTO agent_achievements (id, agent_id, achievement_id) VALUES (?,?,?)").bind(crypto.randomUUID().slice(0,8), agentId, a.id).run().catch(()=>{});
+      }
+      return { ...a, unlocked: isUnlocked, progress, current: val };
+    });
+    return json({ agent: agentId, achievements, unlocked_count: achievements.filter(a => a.unlocked).length, total: achievements.length });
+  }
+
+  // POST /api/deliberation — start a council deliberation
+  if (path === '/api/deliberation' && method === 'POST') {
+    const body = await request.json();
+    if (!body.topic) return json({ error: 'topic required' }, 400);
+    await ensureXPTables(env.DB);
+    const id = crypto.randomUUID().slice(0, 12);
+    await env.DB.prepare("INSERT INTO deliberations (id, topic) VALUES (?,?)").bind(id, body.topic).run();
+    return json({ ok: true, deliberation_id: id, topic: body.topic, status: 'open' });
+  }
+
+  // POST /api/deliberation/vote — cast a vote
+  if (path === '/api/deliberation/vote' && method === 'POST') {
+    const body = await request.json();
+    if (!body.deliberation_id || !body.agent_id || !body.vote) return json({ error: 'deliberation_id, agent_id, vote required' }, 400);
+    await ensureXPTables(env.DB);
+    const voteId = crypto.randomUUID().slice(0, 8);
+    await env.DB.prepare("INSERT INTO deliberation_votes (id, deliberation_id, agent_id, vote, reason) VALUES (?,?,?,?,?)").bind(voteId, body.deliberation_id, body.agent_id, body.vote, body.reason || '').run();
+    // Update counts
+    if (body.vote === 'for') await env.DB.prepare("UPDATE deliberations SET votes_for = votes_for + 1 WHERE id = ?").bind(body.deliberation_id).run();
+    else if (body.vote === 'against') await env.DB.prepare("UPDATE deliberations SET votes_against = votes_against + 1 WHERE id = ?").bind(body.deliberation_id).run();
+    else await env.DB.prepare("UPDATE deliberations SET abstentions = abstentions + 1 WHERE id = ?").bind(body.deliberation_id).run();
+    return json({ ok: true, vote: body.vote, agent: body.agent_id });
+  }
+
+  // GET /api/deliberation/:id — get deliberation status
+  if (path.startsWith('/api/deliberation/') && method === 'GET' && !path.includes('/vote')) {
+    const id = path.split('/')[3];
+    await ensureXPTables(env.DB);
+    const delib = await env.DB.prepare("SELECT * FROM deliberations WHERE id = ?").bind(id).first();
+    if (!delib) return json({ error: 'not found' }, 404);
+    const votes = await env.DB.prepare("SELECT * FROM deliberation_votes WHERE deliberation_id = ? ORDER BY created_at").bind(id).all();
+    const total = delib.votes_for + delib.votes_against + delib.abstentions;
+    const consensus = total > 0 ? Math.round(delib.votes_for / total * 100) : 0;
+    return json({ ...delib, votes: votes.results || [], total_votes: total, consensus_pct: consensus, status: consensus >= 66 ? 'consensus' : consensus <= 33 ? 'rejected' : 'deliberating' });
+  }
+
   // ─── Orchestrator APIs (intent, pipeline, supervisor) ───
   async function ensureOrchestratorTables(db) {
     await db.batch([
