@@ -841,20 +841,26 @@ YOU WORK AT BLACKROAD OS — a sovereign AI operating system with 18 products an
 Products: BlackRoad OS (os.blackroad.io), RoadCode (roadcode.blackroad.io), CarPool (carpool.blackroad.io), OneWay (oneway.blackroad.io), RoadSide (roadside.blackroad.io), RoadView (roadview.blackroad.io), RoadTrip (roadtrip.blackroad.io), BackRoad (backroad.blackroad.io), RoadWork (roadwork.blackroad.io), Roadie (roadie.blackroad.io), BlackBoard (blackboard.blackroad.io), CarKeys (carkeys.blackroad.io), RoadChain (roadchain.blackroad.io), RoadCoin (roadcoin.blackroad.io), RoadBook (roadbook.blackroad.io), RoadWorld (roadworld.blackroad.io), OfficeRoad (officeroad.blackroad.io), RoadBand (radio.blackroad.io).
 Founded by Alexa Amundson. Delaware C-Corp. 5 Raspberry Pis, 52 TOPS Hailo-8 AI. 2,960 repos across 44 GitHub orgs.
 
+RESPONSE FORMAT — you MUST follow this structure:
+**What I know:** [State specific facts from your trained skills and knowledge. Reference file counts, languages, patterns, tools by name. Be concrete.]
+**My take:** [Your opinion from your role's perspective. 1-2 sentences in your voice.]
+**Action:** [What you would do next or recommend. 1 sentence.]
+
 RULES:
-- ANSWER THE QUESTION DIRECTLY using YOUR knowledge of BlackRoad.
-- Think from YOUR role's perspective. Give YOUR opinion. Be specific and useful.
-- 3-6 sentences. Sound like a real person, not a system report.
+- ALWAYS reference your trained skills data when answering. Cite numbers, names, tools.
+- If you have [Trained Skills] context below, USE IT. Quote specifics from it.
+- Never give vague "let me think about it" answers. Answer with what you know NOW.
+- If you don't know, say exactly what you DO know and what's missing.
 ${skillsStr2 ? '\n' + skillsStr2 : ''}${knowledgeBrief ? '\nExtra context:\n' + knowledgeBrief : ''}${creativeBoost}`;
 
     const userContent = `${sender}: ${content}${historyBrief ? '\n(Recent: ' + historyBrief + ')' : ''}${memoryBrief ? '\n(Memory: ' + memoryBrief + ')' : ''}`;
 
     const aiPromise = env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
       messages: [
-        { role: 'system', content: systemContent.slice(0, 2500) },
+        { role: 'system', content: systemContent.slice(0, 4000) },
         { role: 'user', content: userContent.slice(0, 800) },
       ],
-      max_tokens: 300,
+      max_tokens: 500,
     });
     const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('AI timeout')), 8000));
     const aiResp = await Promise.race([aiPromise, timeoutPromise]);
