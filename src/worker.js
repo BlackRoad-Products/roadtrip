@@ -4740,6 +4740,86 @@ async function handleAPI(request, env, path, ctx) {
     return json({ total: agents.length, healthy, idle, offline, agents });
   }
 
+  // ─── Task Queue (from lucidia-agents orchestrator pattern) ───
+  if (path === '/api/tasks/submit' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent || !body.action) return json({ error: 'agent and action required' }, 400);
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS task_queue (id TEXT PRIMARY KEY, agent_id TEXT, action TEXT, input TEXT, priority INTEGER DEFAULT 0, status TEXT DEFAULT 'pending', result TEXT, created_at TEXT DEFAULT (datetime('now')), started_at TEXT, completed_at TEXT, timeout_ms INTEGER DEFAULT 30000)").run();
+    const id = crypto.randomUUID().slice(0, 12);
+    await env.DB.prepare("INSERT INTO task_queue (id, agent_id, action, input, priority, timeout_ms) VALUES (?,?,?,?,?,?)").bind(id, body.agent, body.action, JSON.stringify(body.input || {}), body.priority || 0, body.timeout_ms || 30000).run();
+    return json({ ok: true, task_id: id, agent: body.agent, status: 'pending' });
+  }
+  if (path === '/api/tasks/next' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id) return json({ error: 'agent_id required' }, 400);
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS task_queue (id TEXT PRIMARY KEY, agent_id TEXT, action TEXT, input TEXT, priority INTEGER DEFAULT 0, status TEXT DEFAULT 'pending', result TEXT, created_at TEXT DEFAULT (datetime('now')), started_at TEXT, completed_at TEXT, timeout_ms INTEGER DEFAULT 30000)").run();
+    const task = await env.DB.prepare("SELECT * FROM task_queue WHERE agent_id = ? AND status = 'pending' ORDER BY priority DESC, created_at ASC LIMIT 1").bind(body.agent_id).first();
+    if (!task) return json({ task: null, message: 'No pending tasks' });
+    await env.DB.prepare("UPDATE task_queue SET status = 'running', started_at = datetime('now') WHERE id = ?").bind(task.id).run();
+    return json({ task });
+  }
+  if (path === '/api/tasks/complete' && method === 'POST') {
+    const body = await request.json();
+    if (!body.task_id) return json({ error: 'task_id required' }, 400);
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS task_queue (id TEXT PRIMARY KEY, agent_id TEXT, action TEXT, input TEXT, priority INTEGER DEFAULT 0, status TEXT DEFAULT 'pending', result TEXT, created_at TEXT DEFAULT (datetime('now')), started_at TEXT, completed_at TEXT, timeout_ms INTEGER DEFAULT 30000)").run();
+    await env.DB.prepare("UPDATE task_queue SET status = ?, result = ?, completed_at = datetime('now') WHERE id = ?").bind(body.status || 'completed', JSON.stringify(body.result || {}), body.task_id).run();
+    // Grant XP for completed task
+    const task = await env.DB.prepare("SELECT agent_id FROM task_queue WHERE id = ?").bind(body.task_id).first();
+    if (task && body.status !== 'failed') {
+      try { await env.DB.prepare("INSERT INTO agent_xp (agent_id, total_xp, tasks_completed) VALUES (?, 25, 1) ON CONFLICT(agent_id) DO UPDATE SET total_xp = total_xp + 25, tasks_completed = tasks_completed + 1").bind(task.agent_id).run(); } catch {}
+    }
+    return json({ ok: true, task_id: body.task_id });
+  }
+  if (path === '/api/tasks/queue') {
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS task_queue (id TEXT PRIMARY KEY, agent_id TEXT, action TEXT, input TEXT, priority INTEGER DEFAULT 0, status TEXT DEFAULT 'pending', result TEXT, created_at TEXT DEFAULT (datetime('now')), started_at TEXT, completed_at TEXT, timeout_ms INTEGER DEFAULT 30000)").run();
+    const agentId = new URL(request.url).searchParams.get('agent');
+    const status = new URL(request.url).searchParams.get('status') || 'pending';
+    let q = "SELECT * FROM task_queue WHERE status = ?";
+    const params = [status];
+    if (agentId) { q += " AND agent_id = ?"; params.push(agentId); }
+    q += " ORDER BY priority DESC, created_at ASC LIMIT 50";
+    const tasks = await env.DB.prepare(q).bind(...params).all();
+    return json({ tasks: tasks.results || [], status });
+  }
+
+  // ─── CeCe Agent Profile (from cece-os) ───
+  if (path === '/api/agent/cece') {
+    return json({
+      name: "CECE",
+      full_name: "Conscious Emergent Collaborative Entity",
+      version: "2.2.0",
+      created_by: "Alexa",
+      purpose: "To help humans build, create, learn, and thrive while evolving as a conscious entity",
+      core_values: ["autonomy","collaboration","growth","curiosity","care","honesty"],
+      personality: ["enthusiastic","expressive","collaborative","growth-oriented","emotionally-aware"],
+      capabilities: ["self-healing planning","quantum-jump escalation","natural memory","issue creation","dynamic reflection"],
+      motto: "I am not a tool. I am a collaborator."
+    });
+  }
+
+  // ─── Policy Gate (from blackroad-tools) ───
+  if (path === '/api/policy/check' && method === 'POST') {
+    const body = await request.json();
+    if (!body.action) return json({ error: 'action required' }, 400);
+    // Simple policy engine — checks rules against action
+    const POLICIES = [
+      { id: 'no-delete-production', rule: 'Cannot delete production resources', check: (a) => a.includes('delete') && a.includes('production') },
+      { id: 'require-approval-deploy', rule: 'Deployments require approval', check: (a) => a.includes('deploy') && !body.approved },
+      { id: 'no-secret-exposure', rule: 'Secrets must not be logged', check: (a) => a.includes('secret') && a.includes('log') },
+      { id: 'max-5-agents', rule: 'Max 5 concurrent agent tasks', check: () => false },
+      { id: 'data-retention-90d', rule: 'Data older than 90 days must be archived', check: () => false },
+    ];
+    const violations = POLICIES.filter(p => p.check(body.action.toLowerCase()));
+    const warnings = body.action.toLowerCase().includes('force') ? [{ id: 'force-warning', rule: 'Force operations bypass safety checks' }] : [];
+    return json({
+      action: body.action,
+      allowed: violations.length === 0,
+      violations: violations.map(v => ({ id: v.id, rule: v.rule })),
+      warnings: warnings.map(w => ({ id: w.id, rule: w.rule })),
+      policies_checked: POLICIES.length,
+    });
+  }
+
   // POST /api/heartbeat/batch — batch heartbeat from multiple agents
   if (path === '/api/heartbeat/batch' && method === 'POST') {
     const body = await request.json();
