@@ -624,7 +624,7 @@ async function ensureTables(db) {
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_skills_agent ON agent_skills(agent_id, skill_name)`),
     // Persistent knowledge base — survives across sessions, feeds into prompts
-    db.prepare(`CREATE TABLE IF NOT EXISTS agent_knowledge (`
+    db.prepare(`CREATE TABLE IF NOT EXISTS agent_knowledge (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
       category TEXT NOT NULL DEFAULT 'fact',
