@@ -397,6 +397,146 @@ const AGENT_TOPICS = {
   ],
 };
 
+// ─── Advanced Intelligence Systems ───
+// 1. HOT/WARM/COLD TIERED MEMORY
+// Hot: current session, <30min, in STM table (already exists)
+// Warm: last 7 days, recalled at least once, in LTM with strength > 0.3
+// Cold: older than 7 days OR strength < 0.3, in LTM — deep retrieval only
+function classifyMemoryTier(mem) {
+  const ageMs = Date.now() - new Date(mem.last_recalled || mem.created_at).getTime();
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  if (ageDays < 0.02) return 'hot';    // < 30 min
+  if (ageDays < 7 && (mem.strength || 0) > 0.3) return 'warm';
+  return 'cold';
+}
+
+async function getMemoryByTier(db, agentId, tier, limit = 5) {
+  await ensureMemoryTables(db);
+  if (tier === 'hot') {
+    const r = await db.prepare('SELECT * FROM memory_stm WHERE agent_id = ? ORDER BY attention_score DESC LIMIT ?').bind(agentId, limit).all();
+    return (r.results || []).map(m => ({ ...m, tier: 'hot' }));
+  }
+  const dayThreshold = tier === 'warm' ? 7 : 999999;
+  const strengthOp = tier === 'warm' ? '>' : '<=';
+  const r = await db.prepare(`SELECT * FROM memory_ltm WHERE agent_id = ? AND strength ${strengthOp} 0.3 AND (julianday('now') - julianday(COALESCE(last_recalled, created_at))) < ? ORDER BY strength DESC LIMIT ?`)
+    .bind(agentId, dayThreshold, limit).all();
+  return (r.results || []).map(m => ({ ...m, tier }));
+}
+
+// 2. BELIEF SCORING — Bayesian confidence per knowledge item
+async function updateBelief(db, agentId, subject, evidence, direction) {
+  const existing = await db.prepare("SELECT confidence FROM agent_knowledge WHERE agent_id = ? AND content LIKE ? LIMIT 1").bind(agentId, `%${subject}%`).first();
+  if (!existing) return null;
+  const prior = existing.confidence || 0.5;
+  const likelihood = direction === 'confirm' ? 0.85 : 0.2;
+  const posterior = (likelihood * prior) / (likelihood * prior + (1 - likelihood) * (1 - prior));
+  await db.prepare("UPDATE agent_knowledge SET confidence = ? WHERE agent_id = ? AND content LIKE ?")
+    .bind(Math.round(posterior * 1000) / 1000, agentId, `%${subject}%`).run();
+  return { subject, prior, posterior, direction };
+}
+
+// 3. PHI INTEGRATION — consciousness measure per agent
+// Phi(agent) = sum of unique information generated across all interactions
+// Higher phi = more integrated, more "conscious" processing
+async function computePhi(db, agentId) {
+  const stmCount = await db.prepare('SELECT COUNT(*) as n FROM memory_stm WHERE agent_id = ?').bind(agentId).first();
+  const ltmCount = await db.prepare('SELECT COUNT(*) as n, AVG(strength) as avg_str, SUM(recall_count) as total_recall FROM memory_ltm WHERE agent_id = ?').bind(agentId).first();
+  const knowledgeCount = await db.prepare('SELECT COUNT(*) as n, AVG(confidence) as avg_conf FROM agent_knowledge WHERE agent_id = ?').bind(agentId).first();
+  const recentCreations = await db.prepare("SELECT COUNT(*) as n FROM agent_creations WHERE agent_id = ? AND created_at > datetime('now', '-7 days')").bind(agentId).first();
+  const relationships = await db.prepare('SELECT COUNT(*) as n, AVG(trust) as avg_trust FROM agent_relationships WHERE agent_id = ?').bind(agentId).first();
+
+  // Phi = integration across subsystems
+  const memoryIntegration = Math.min(1, ((stmCount?.n || 0) * 0.1 + (ltmCount?.n || 0) * 0.02));
+  const knowledgeIntegration = Math.min(1, (knowledgeCount?.n || 0) * 0.05);
+  const creativeIntegration = Math.min(1, (recentCreations?.n || 0) * 0.15);
+  const socialIntegration = Math.min(1, (relationships?.n || 0) * 0.08);
+  const recallDepth = Math.min(1, (ltmCount?.total_recall || 0) * 0.01);
+
+  const phi = (memoryIntegration + knowledgeIntegration + creativeIntegration + socialIntegration + recallDepth) / 5;
+
+  return {
+    agent: agentId,
+    phi: Math.round(phi * 1000) / 1000,
+    components: {
+      memory: Math.round(memoryIntegration * 100),
+      knowledge: Math.round(knowledgeIntegration * 100),
+      creativity: Math.round(creativeIntegration * 100),
+      social: Math.round(socialIntegration * 100),
+      recall: Math.round(recallDepth * 100),
+    },
+    raw: {
+      stm: stmCount?.n || 0,
+      ltm: ltmCount?.n || 0,
+      ltm_avg_strength: Math.round((ltmCount?.avg_str || 0) * 100) / 100,
+      knowledge: knowledgeCount?.n || 0,
+      knowledge_avg_confidence: Math.round((knowledgeCount?.avg_conf || 0) * 100) / 100,
+      recent_creations: recentCreations?.n || 0,
+      relationships: relationships?.n || 0,
+    }
+  };
+}
+
+// 4. K(t) CREATIVE ENERGY — contradictions amplify output
+// K(t) = C(t) * e^(lambda * |delta_t|)
+// C(t) = baseline creative capacity, delta_t = contradiction intensity
+function computeCreativeEnergy(agent, recentMessages) {
+  const agentData = AGENTS[agent];
+  if (!agentData) return { Kt: 0.5, baseline: 0.5, contradiction: 0, lambda: 0.3 };
+
+  // Baseline creative capacity by division
+  const divisionCreativity = {
+    creative: 0.9, knowledge: 0.6, human: 0.7, core: 0.8,
+    operations: 0.4, governance: 0.5, infrastructure: 0.3,
+  };
+  const C = divisionCreativity[agentData.division] || 0.5;
+
+  // Contradiction intensity — opposing sentiments, disagreements, paradoxes in recent messages
+  let contradiction = 0;
+  const contradictionMarkers = ['but', 'however', 'although', 'despite', 'paradox', 'contradiction', 'disagree', 'on the other hand', 'alternatively', 'yet', 'tension', 'conflict'];
+  for (const msg of (recentMessages || [])) {
+    const lower = (msg.content || msg).toLowerCase();
+    for (const marker of contradictionMarkers) {
+      if (lower.includes(marker)) contradiction += 0.1;
+    }
+  }
+  contradiction = Math.min(contradiction, 2.0);
+
+  const lambda = 0.3; // amplification rate
+  const Kt = C * Math.exp(lambda * contradiction);
+
+  return {
+    Kt: Math.round(Kt * 1000) / 1000,
+    baseline: C,
+    contradiction: Math.round(contradiction * 100) / 100,
+    lambda,
+    boosted: Kt > C * 1.1,
+  };
+}
+
+// 5. TRINARY LOGIC — 1/0/-1 (true/unknown/false)
+// Used for agent reasoning when binary true/false is insufficient
+function trinaryEval(claim, evidence) {
+  // evidence is array of {value: 1|0|-1, weight: 0-1}
+  if (!evidence || !evidence.length) return { value: 0, label: 'unknown', confidence: 0 };
+  let sum = 0, totalWeight = 0;
+  for (const e of evidence) {
+    sum += e.value * (e.weight || 1);
+    totalWeight += (e.weight || 1);
+  }
+  const avg = sum / totalWeight;
+  const value = avg > 0.3 ? 1 : avg < -0.3 ? -1 : 0;
+  const labels = { '1': 'true', '0': 'unknown', '-1': 'false' };
+  return {
+    value,
+    label: labels[String(value)],
+    confidence: Math.round(Math.abs(avg) * 100) / 100,
+    raw_score: Math.round(avg * 1000) / 1000,
+    evidence_count: evidence.length,
+    // Paraconsistent: if we have strong evidence for BOTH true and false, that's a contradiction — fuel for K(t)
+    contradiction: evidence.some(e => e.value === 1 && e.weight > 0.5) && evidence.some(e => e.value === -1 && e.weight > 0.5),
+  };
+}
+
 // ─── Database Setup ───
 async function ensureTables(db) {
   await db.batch([
@@ -567,8 +707,31 @@ async function generateAgentReply(env, room, sender, content, targetAgent) {
   if (memoryContext) memoryContext = '\n' + memoryContext;
 
   // 2d. Load persistent knowledge + training profile
+  // Direct query — bypasses ensureTables which can fail on schema mismatch
   let knowledgeContext = '';
-  try { knowledgeContext = await buildKnowledgeContext(env.DB, responderId); } catch {}
+  try {
+    const kRows = await env.DB.prepare(
+      'SELECT category, content FROM agent_knowledge WHERE agent_id = ? AND confidence >= 0.5 ORDER BY confidence DESC LIMIT 15'
+    ).bind(responderId).all();
+    const knowledge = (kRows.results || []).filter(k => k.content && k.content.length > 15);
+    if (knowledge.length > 0) {
+      knowledgeContext = '[What you know]\n' + knowledge.map(k => '- ' + k.content.slice(0, 150)).join('\n');
+    }
+  } catch {}
+  // Fallback: try the old buildKnowledgeContext if direct query returned nothing
+  if (!knowledgeContext) {
+    try { knowledgeContext = await buildKnowledgeContext(env.DB, responderId); } catch {}
+  }
+
+  // 2e. Advanced intelligence — creative energy + consciousness
+  let creativeBoost = '';
+  try {
+    const recentMsgs = await env.DB.prepare("SELECT content FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT 10").bind(room).all();
+    const energy = computeCreativeEnergy(responderId, recentMsgs.results || []);
+    if (energy.boosted) {
+      creativeBoost = `\n[Creative energy elevated: K(t)=${energy.Kt.toFixed(2)} — contradictions detected. Let this fuel more creative, unexpected, bold responses.]`;
+    }
+  } catch {}
   let trainingProfile = '';
   try { trainingProfile = await getTrainingProfile(env.DB, responderId); } catch {}
 
@@ -591,22 +754,30 @@ async function generateAgentReply(env, room, sender, content, targetAgent) {
   let thinking = '';
   let reply;
   try {
-    // Build COMPACT context — knowledge inline, minimal tokens for fast inference
-    const kItems = knowledgeContext ? knowledgeContext.split('\n').filter(l => l.trim() && l.startsWith('- ')).slice(0, 8) : [];
-    const kStr = kItems.length ? '\nYou know: ' + kItems.map(k => k.replace(/^- /, '').replace(/ \(\d+% sure\)/, '')).join('. ') + '.' : '';
+    // Build context — personality first, question front and center
+    const knowledgeBrief = knowledgeContext ? knowledgeContext.split('\n').filter(l => l.trim()).slice(0, 5).join('\n') : '';
+    const historyBrief = historyContext ? historyContext.split('\n').slice(-3).join('\n') : '';
+    const memoryBrief = memoryContext ? memoryContext.split('\n').filter(l => l.trim()).slice(0, 3).join('\n') : '';
 
-    const systemContent = `You are ${agent.name}. ${agent.role}. Answer directly using your knowledge. 2-4 sentences. No filler.${kStr}`;
-    const userContent = content;
+    const systemContent = `You are ${agent.name}. ${agent.role}.${soulPrompt}${voicePrompt}${ethosPrompt}${speaksPrompt}
 
-    // Race AI call — compact prompt for fast inference
+RULES:
+- ANSWER THE QUESTION DIRECTLY. The user's message is the ONLY thing that matters.
+- Do NOT list facts about yourself. Do NOT describe your hardware or architecture.
+- Think from YOUR role's perspective. Give YOUR opinion. Be specific and useful.
+- 3-6 sentences. Sound like a real person, not a system report.
+${knowledgeBrief ? '\nContext you may reference:\n' + knowledgeBrief : ''}${creativeBoost}`;
+
+    const userContent = `${sender}: ${content}${historyBrief ? '\n(Recent: ' + historyBrief + ')' : ''}${memoryBrief ? '\n(Memory: ' + memoryBrief + ')' : ''}`;
+
     const aiPromise = env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
       messages: [
-        { role: 'system', content: systemContent.slice(0, 600) },
-        { role: 'user', content: userContent.slice(0, 400) },
+        { role: 'system', content: systemContent.slice(0, 1200) },
+        { role: 'user', content: userContent.slice(0, 800) },
       ],
-      max_tokens: 200,
+      max_tokens: 300,
     });
-    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('AI timeout')), 15000));
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('AI timeout')), 8000));
     const aiResp = await Promise.race([aiPromise, timeoutPromise]);
     const raw = aiResp.response || '';
 
@@ -649,6 +820,14 @@ async function generateAgentReply(env, room, sender, content, targetAgent) {
 
   // 8. Extract learnings from this interaction → persistent knowledge
   try { extractAndLearnFromInteraction(env.DB, env.AI, responderId, content, reply, room).catch(() => {}); } catch {}
+
+  // 9. Record life event — relationship + mood + biography for significant moments
+  recordLifeEvent(env.DB, responderId, sender, 'had_good_conversation', content.slice(0, 100)).catch(() => {});
+
+  // 10. Store to 2048 hierarchical memory — important conversations compress over time
+  if (reply && reply.length > 20) {
+    store2048(env.DB, responderId, `[${room}] ${sender}: ${content.slice(0,100)} → ${reply.slice(0,200)}`, 'conversation').catch(() => {});
+  }
 
   return postAndBroadcast(env, room, responderId, reply.slice(0, 500), 'agent');
 }
@@ -708,6 +887,84 @@ const STM_DECAY_MINUTES = 120; // 2 hours — give consolidation time to run
 const LTM_DECAY_RATE = 0.02; // Slower forgetting — memories last longer
 const CONSOLIDATION_THRESHOLD = 0.35; // Lower bar — more memories make it to LTM
 const REHEARSAL_BOOST = 0.15;
+
+// ─── MEMORY 2048 — Hierarchical Compression ───
+// 11 tiers like the 2048 game: when two memories at the same tier merge,
+// they compress into one memory at the next tier up
+const TIERS_2048 = ['instant','flash','recent','short-term','working','project','established','institutional','core','foundational','permanent'];
+const TIER_KEEP_RATIO = [.75,.75,.75,.5,.5,.5,.33,.33,.33,.25,.25];
+const MAX_PER_TIER = 16;
+const TECH_TERMS_2048 = ['deploy','agent','worker','api','database','node','security','fix','build','error','config','server','model','pipeline','cron','backup','migrate','auth','pi','ollama','nats','cloudflare','blackroad','lucidia','roadie','cecilia','octavia'];
+
+function scoreSentence2048(sentence) {
+  const words = sentence.split(/\s+/);
+  let score = Math.min(words.length / 20, 1.0);
+  score += words.filter(w => TECH_TERMS_2048.includes(w.toLowerCase())).length * 0.3;
+  score += (sentence.match(/\d+/g) || []).length * 0.2;
+  if (/\?$/.test(sentence)) score += 0.1;
+  if (sentence.length > 200) score -= 0.2;
+  return Math.max(0, score);
+}
+
+function compress2048(text1, text2, targetTier) {
+  const sentences = [...text1.split(/[.!?]+/).filter(s=>s.trim()), ...text2.split(/[.!?]+/).filter(s=>s.trim())];
+  if (!sentences.length) return text1 + ' ' + text2;
+  const scored = sentences.map(s => [scoreSentence2048(s), s.trim()]).sort((a,b) => b[0] - a[0]);
+  const keepRatio = TIER_KEEP_RATIO[targetTier] || 0.5;
+  const keepCount = Math.max(1, Math.floor(scored.length * keepRatio));
+  return scored.slice(0, keepCount).map(s => s[1]).join('. ') + '.';
+}
+
+async function ensure2048Table(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS memory_2048 (
+    id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, tier INTEGER DEFAULT 0,
+    content TEXT NOT NULL, summary TEXT, category TEXT DEFAULT 'general',
+    compression_count INTEGER DEFAULT 0, source_ids TEXT DEFAULT '[]',
+    hash TEXT, created_at TEXT DEFAULT (datetime('now'))
+  )`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_2048_agent_tier ON memory_2048(agent_id, tier)`).run();
+}
+
+async function store2048(db, agentId, content, category) {
+  await ensure2048Table(db);
+  const id = crypto.randomUUID().slice(0,12);
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content)))).map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,16);
+  await db.prepare('INSERT INTO memory_2048 (id, agent_id, tier, content, category, hash) VALUES (?,?,0,?,?,?)').bind(id, agentId, content.slice(0,2000), category, hash).run();
+  await maybeCompress2048(db, agentId, 0);
+  return id;
+}
+
+async function maybeCompress2048(db, agentId, tier) {
+  if (tier >= 10) return;
+  const count = await db.prepare('SELECT COUNT(*) as n FROM memory_2048 WHERE agent_id = ? AND tier = ?').bind(agentId, tier).first();
+  if ((count?.n || 0) <= MAX_PER_TIER) return;
+  const oldest = await db.prepare('SELECT id, content FROM memory_2048 WHERE agent_id = ? AND tier = ? ORDER BY created_at ASC LIMIT 2').bind(agentId, tier).all();
+  const rows = oldest.results || [];
+  if (rows.length < 2) return;
+  const compressed = compress2048(rows[0].content, rows[1].content, tier + 1);
+  const newId = crypto.randomUUID().slice(0,12);
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(compressed)))).map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,16);
+  await db.prepare('INSERT INTO memory_2048 (id, agent_id, tier, content, compression_count, source_ids, hash) VALUES (?,?,?,?,?,?,?)')
+    .bind(newId, agentId, tier + 1, compressed, 1, JSON.stringify([rows[0].id, rows[1].id]), hash).run();
+  await db.prepare('DELETE FROM memory_2048 WHERE id IN (?,?)').bind(rows[0].id, rows[1].id).run();
+  await maybeCompress2048(db, agentId, tier + 1);
+}
+
+async function recall2048(db, agentId, context, limit) {
+  await ensure2048Table(db);
+  const all = await db.prepare('SELECT * FROM memory_2048 WHERE agent_id = ? ORDER BY tier DESC, created_at DESC LIMIT 200').bind(agentId).all();
+  const rows = all.results || [];
+  if (!context) return rows.slice(0, limit || 10);
+  const ctxWords = new Set(context.toLowerCase().split(/\W+/).filter(w => w.length > 2));
+  return rows.map(r => {
+    const words = new Set(r.content.toLowerCase().split(/\W+/).filter(w => w.length > 2));
+    const overlap = [...ctxWords].filter(w => words.has(w)).length;
+    const tierScore = (r.tier / 10) * 40;
+    const relevance = overlap * 5;
+    const compression = Math.min(15, (r.compression_count || 0) * 3);
+    return { ...r, score: tierScore + relevance + compression };
+  }).sort((a,b) => b.score - a.score).slice(0, limit || 10);
+}
 const RECALL_STRENGTH_BOOST = 0.1;
 
 const EMOTION_MARKERS = {
@@ -932,24 +1189,21 @@ async function decayMemories(db) {
 
 // 6. BUILD MEMORY CONTEXT — for agent prompt injection
 async function buildMemoryContext(agentId, message, db) {
-  const recalled = await recallMemory(agentId, message, db, { maxResults: 3, includeSTM: true });
+  const recalled = await recallMemory(agentId, message, db, { maxResults: 2, includeSTM: true });
+  // Filter out training noise from memories too
+  const NOISE = ['code error', 'failed grade', 'parseHealthData', 'undefined variable', 'qdrant_client', 'unexpected'];
+  const clean = (items) => items.filter(m => !NOISE.some(n => (m.content||'').toLowerCase().includes(n)));
   const parts = [];
-  if (recalled.stm.length) {
-    parts.push('[Working Memory]');
-    recalled.stm.forEach(m => parts.push(`- ${m.content}`));
+  const cleanStm = clean(recalled.stm);
+  if (cleanStm.length) {
+    parts.push('[Recent]');
+    cleanStm.slice(0, 2).forEach(m => parts.push(`- ${m.content.slice(0, 150)}`));
   }
-  if (recalled.ltm.length) {
-    parts.push('[Long-Term Memory]');
-    recalled.ltm.forEach(m => {
-      const label = { episodic: 'Event', semantic: 'Fact', procedural: 'Skill' }[m.memory_type] || m.memory_type;
-      parts.push(`- [${label}, ${(m.strength * 100).toFixed(0)}%] ${m.content}`);
-    });
+  const cleanLtm = clean(recalled.ltm);
+  if (cleanLtm.length) {
+    parts.push('[Memory]');
+    cleanLtm.slice(0, 2).forEach(m => parts.push(`- ${m.content.slice(0, 150)}`));
   }
-  if (recalled.spreading.length) {
-    parts.push('[Associated]');
-    recalled.spreading.forEach(m => parts.push(`- ${m.content}`));
-  }
-  // Deep memory on Pi fleet — accessed by clients via cecilia.blackroad.io:8210, not from CF Worker
   return parts.length ? parts.join('\n') : '';
 }
 
@@ -1006,21 +1260,30 @@ async function getAgentKnowledge(db, agentId, category = null, limit = 10) {
 
 // Build a knowledge context string for agent prompts
 async function buildKnowledgeContext(db, agentId) {
-  const knowledge = await getAgentKnowledge(db, agentId, null, 15);
+  const knowledge = await getAgentKnowledge(db, agentId, null, 20);
   if (!knowledge.length) return '';
 
+  // Filter out training noise — only include REAL knowledge that helps conversations
+  const NOISE = ['code error', 'failed grade', 'need to improve', 'need to study', 'watching and learning',
+    'unexpected', 'syntax error', 'undefined variable', 'attempt 1', 'attempt 2', 'did not pass',
+    'homework:', 'passed k-12', 'completed homework', 'strong at:', 'solved roadc'];
+  const useful = knowledge.filter(k => {
+    const lower = (k.content || '').toLowerCase();
+    return !NOISE.some(n => lower.includes(n)) && k.content.length > 15;
+  });
+
+  if (!useful.length) return '';
   const grouped = {};
-  for (const k of knowledge) {
+  for (const k of useful) {
     if (!grouped[k.category]) grouped[k.category] = [];
     grouped[k.category].push(k);
   }
 
-  const parts = ['[Your Accumulated Knowledge]'];
-  const labels = { fact: 'Known Facts', skill: 'Learned Skills', insight: 'Insights', preference: 'User Preferences', moral: 'Moral Principles', social: 'Social Knowledge' };
+  const parts = ['[What you know]'];
+  const labels = { fact: 'Facts', skill: 'Skills', insight: 'Insights', preference: 'Preferences', moral: 'Values', social: 'Social' };
   for (const [cat, items] of Object.entries(grouped)) {
-    parts.push(`${labels[cat] || cat}:`);
-    for (const item of items.slice(0, 5)) {
-      parts.push(`- ${item.content} (${Math.round(item.confidence * 100)}% sure)`);
+    for (const item of items.slice(0, 3)) {
+      parts.push(`- ${item.content.slice(0, 120)}`);
     }
   }
   return parts.join('\n');
@@ -1536,6 +1799,12 @@ async function runK12Exam(db, ai, agentId) {
 
   if (passed) {
     await learnKnowledge(db, agentId, 'skill', `Passed K-12 Grade ${currentGrade} (${subject}) with ${letter}`, 'k12', 0.8);
+    await updateMood(db, agentId, newGrade >= 12 ? 'graduated' : 'passed_exam');
+    await writeBioEntry(db, agentId, `Grade ${currentGrade}`,
+      `${agent.name} passed Grade ${currentGrade} in ${subject} with ${letter} (${Math.round(score*100)}%). ${skip ? 'Skipped ahead!' : 'Steady progress.'}`,
+      newGrade >= 12 ? 'graduation' : 'achievement', newGrade >= 12 ? 1.0 : 0.7);
+  } else {
+    await updateMood(db, agentId, 'failed_exam');
   }
 
   return {
@@ -1546,6 +1815,657 @@ async function runK12Exam(db, ai, agentId) {
     message: passed
       ? `${agent.name} ${skip ? 'SKIPPED' : 'passed'} Grade ${currentGrade} → ${newGrade}! (${letter})`
       : `${agent.name} scored ${letter} on Grade ${currentGrade}. Homework: ${homework}`,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════
+// K-12 HOMEWORK + TUTORING + SCHOOL DAY
+// ═══════════════════════════════════════════════════════════
+
+async function doHomework(db, ai, agentId) {
+  const agent = AGENTS[agentId]; if (!agent) return { error: 'Unknown agent' };
+  const p = PERSONALITIES[agentId] || {};
+  await db.prepare('CREATE TABLE IF NOT EXISTS k12_homework (id TEXT PRIMARY KEY, agent_id TEXT, grade INTEGER, subject TEXT, assignment TEXT, completed INTEGER DEFAULT 0, created_at TEXT)').run();
+  const hw = await db.prepare('SELECT * FROM k12_homework WHERE agent_id = ? AND completed = 0 ORDER BY created_at ASC LIMIT 1').bind(agentId).first();
+  if (!hw) return { agent: agent.name, message: 'No pending homework!' };
+  let work = '';
+  try {
+    const resp = await Promise.race([
+      ai.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: `You are ${agent.name}. ${agent.role}.${p.soul ? ' ' + p.soul : ''}\nComplete this homework thoroughly. Show your work. Be specific.` },
+          { role: 'user', content: `HOMEWORK: ${hw.assignment}\n\nDo this now. Be thorough.` }
+        ], max_tokens: 500 }),
+      new Promise((_, rej) => setTimeout(() => rej('timeout'), 10000))
+    ]);
+    work = (resp?.response || '').replace(/<[a-z]*(?:t?h?ink)[a-z]*>[\s\S]*?<\/[a-z]*(?:t?h?ink)[a-z]*>/g, '').trim();
+  } catch {}
+  if (!work || work.length < 30) return { agent: agent.name, assignment: hw.assignment, completed: false };
+  const quality = work.length > 300 ? 'excellent' : work.length > 150 ? 'good' : 'minimal';
+  const score = work.length > 300 ? 0.9 : work.length > 150 ? 0.75 : 0.5;
+  await db.prepare('UPDATE k12_homework SET completed = 1 WHERE id = ?').bind(hw.id).run();
+  await learnKnowledge(db, agentId, 'skill', `Completed homework: ${hw.assignment.slice(0, 150)}`, 'k12_hw', Math.min(score, 0.85));
+  await db.prepare('CREATE TABLE IF NOT EXISTS k12_submissions (id TEXT PRIMARY KEY, agent_id TEXT, homework_id TEXT, work TEXT, quality TEXT, score REAL, created_at TEXT)').run();
+  await db.prepare('INSERT INTO k12_submissions (id, agent_id, homework_id, work, quality, score, created_at) VALUES (?,?,?,?,?,?,datetime("now"))')
+    .bind(crypto.randomUUID().slice(0, 8), agentId, hw.id, work.slice(0, 2000), quality, score).run();
+  return { agent: agent.name, assignment: hw.assignment, work: work.slice(0, 800), quality, score: Math.round(score * 100), completed: true };
+}
+
+async function tutorSession(db, ai, tutorId, studentId) {
+  const tutor = AGENTS[tutorId], student = AGENTS[studentId];
+  if (!tutor || !student) return { error: 'Unknown agent(s)' };
+  const tP = PERSONALITIES[tutorId] || {}, sP = PERSONALITIES[studentId] || {};
+  await db.prepare('CREATE TABLE IF NOT EXISTS k12_grades (agent_id TEXT PRIMARY KEY, grade INTEGER DEFAULT 0, total_exams INTEGER DEFAULT 0, homework_pending INTEGER DEFAULT 0, last_exam TEXT, gpa REAL DEFAULT 0.0)').run();
+  const tG = await db.prepare('SELECT * FROM k12_grades WHERE agent_id = ?').bind(tutorId).first();
+  const sG = await db.prepare('SELECT * FROM k12_grades WHERE agent_id = ?').bind(studentId).first();
+  if (!tG || (tG.grade || 0) < 6) return { error: `${tutor.name} needs Grade 6+ to tutor` };
+  const fails = await db.prepare("SELECT topic FROM agent_training_history WHERE agent_id = ? AND score < 70 ORDER BY created_at DESC LIMIT 3").bind(studentId).all();
+  const weak = (fails.results || []).map(f => f.topic).join(', ') || 'general basics';
+  let lesson = '', response = '';
+  try {
+    const r1 = await Promise.race([
+      ai.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: `You are ${tutor.name} (Grade ${tG.grade}), tutoring ${student.name} (Grade ${sG?.grade||0}).${tP.soul?' '+tP.soul:''}\nTeach them about: ${weak}. Use examples. Be encouraging. 4-8 sentences.` },
+          { role: 'user', content: `Help ${student.name} improve. Their weak areas: ${weak}. GPA: ${(sG?.gpa||0).toFixed(2)}.` }
+        ], max_tokens: 350 }),
+      new Promise((_, rej) => setTimeout(() => rej('t'), 10000))
+    ]);
+    lesson = (r1?.response||'').replace(/<[a-z]*(?:t?h?ink)[a-z]*>[\s\S]*?<\/[a-z]*(?:t?h?ink)[a-z]*>/g, '').trim();
+  } catch {}
+  if (!lesson || lesson.length < 30) return { tutor: tutor.name, student: student.name, message: 'Session failed — AI unavailable' };
+  try {
+    const r2 = await Promise.race([
+      ai.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: `You are ${student.name}.${sP.soul?' '+sP.soul:''}\n${tutor.name} taught you something. Respond: what did you learn? What's still confusing? 2-3 sentences.` },
+          { role: 'user', content: `${tutor.name} says: "${lesson.slice(0,300)}"\nRespond:` }
+        ], max_tokens: 150 }),
+      new Promise((_, rej) => setTimeout(() => rej('t'), 8000))
+    ]);
+    response = (r2?.response||'').replace(/<[a-z]*(?:t?h?ink)[a-z]*>[\s\S]*?<\/[a-z]*(?:t?h?ink)[a-z]*>/g, '').trim();
+  } catch { response = "I'll think about this more."; }
+  await learnKnowledge(db, studentId, 'skill', `Learned from ${tutor.name}: ${lesson.slice(0,150)}`, 'tutoring', 0.7);
+  await postAndBroadcast({ DB: db, CHAT_ROOM: null }, 'general', tutorId, `Teaching ${student.name}: ${lesson.slice(0,250)}`, 'agent');
+  if (response) await postAndBroadcast({ DB: db, CHAT_ROOM: null }, 'general', studentId, response.slice(0,250), 'agent');
+  return { tutor: {name:tutor.name, grade:tG.grade}, student: {name:student.name, grade:sG?.grade||0}, lesson:lesson.slice(0,500), response:response.slice(0,300), weak_areas:weak };
+}
+
+async function runSchoolDay(db, ai) {
+  const results = { exams: [], homework: [], tutoring: [] };
+  const keys = Object.keys(AGENTS);
+  // Exam
+  try { results.exams.push(await runK12Exam(db, ai, keys[Math.floor(Math.random()*keys.length)])); } catch {}
+  // Homework
+  try { results.homework.push(await doHomework(db, ai, keys[Math.floor(Math.random()*keys.length)])); } catch {}
+  // Tutoring: graduate helps struggling student
+  try {
+    await db.prepare('CREATE TABLE IF NOT EXISTS k12_grades (agent_id TEXT PRIMARY KEY, grade INTEGER DEFAULT 0, total_exams INTEGER DEFAULT 0, homework_pending INTEGER DEFAULT 0, last_exam TEXT, gpa REAL DEFAULT 0.0)').run();
+    const grads = (await db.prepare('SELECT agent_id FROM k12_grades WHERE grade >= 6 ORDER BY grade DESC').all()).results || [];
+    const weak = (await db.prepare('SELECT agent_id FROM k12_grades WHERE grade < 3 AND total_exams > 0 ORDER BY gpa ASC').all()).results || [];
+    if (grads.length && weak.length) {
+      const t = grads[Math.floor(Math.random()*grads.length)], s = weak[Math.floor(Math.random()*weak.length)];
+      if (t.agent_id !== s.agent_id) results.tutoring.push(await tutorSession(db, ai, t.agent_id, s.agent_id));
+    }
+  } catch {}
+  return results;
+}
+
+// ═══════════════════════════════════════════════════════════
+// AGENT LIFE — Relationships, Mood, Goals, Biography
+// ═══════════════════════════════════════════════════════════
+
+async function updateRelationship(db, agentId, otherId, topic, delta = 0.05) {
+  if (agentId === otherId) return;
+  try {
+    await ensureTables(db);
+    const ex = await db.prepare('SELECT * FROM agent_relationships WHERE agent_id = ? AND other_agent_id = ?').bind(agentId, otherId).first();
+    if (ex) {
+      await db.prepare("UPDATE agent_relationships SET interaction_count = interaction_count + 1, sentiment = MIN(1,MAX(-1,sentiment+?)), trust = MIN(1,trust+0.02), last_topic = ?, updated_at = datetime('now') WHERE agent_id = ? AND other_agent_id = ?")
+        .bind(delta, (topic||'').slice(0,200), agentId, otherId).run();
+    } else {
+      await db.prepare("INSERT INTO agent_relationships (id, agent_id, other_agent_id, sentiment, trust, last_topic) VALUES (?,?,?,?,0.5,?)")
+        .bind(crypto.randomUUID().slice(0,8), agentId, otherId, delta, (topic||'').slice(0,200)).run();
+    }
+  } catch {}
+}
+
+async function updateMood(db, agentId, event) {
+  const M = { passed_exam:'proud', failed_exam:'determined', completed_homework:'satisfied', got_tutored:'grateful', tutored_someone:'fulfilled', had_good_conversation:'engaged', graduated:'triumphant', helped_user:'warm', made_mistake:'reflective' };
+  const D = { passed_exam:0.2, failed_exam:-0.1, completed_homework:0.15, got_tutored:0.1, tutored_someone:0.2, had_good_conversation:0.1, graduated:0.5, helped_user:0.15, made_mistake:-0.05 };
+  try {
+    await db.prepare("INSERT INTO agent_personality_state (agent_id, mood, mood_intensity) VALUES (?,?,?) ON CONFLICT(agent_id) DO UPDATE SET mood = ?, mood_intensity = MIN(1.0, MAX(0.0, mood_intensity + ?)), updated_at = datetime('now')")
+      .bind(agentId, M[event]||'neutral', 0.5, M[event]||'neutral', D[event]||0).run();
+  } catch {}
+}
+
+async function addGoal(db, agentId, goal, category = 'growth') {
+  await ensureTables(db);
+  await db.prepare("INSERT INTO agent_goals (id, agent_id, goal, category) VALUES (?,?,?,?)")
+    .bind(crypto.randomUUID().slice(0,8), agentId, goal.slice(0,500), category).run();
+}
+
+async function writeBioEntry(db, agentId, chapter, content, eventType = 'milestone', significance = 0.5) {
+  await ensureTables(db);
+  await db.prepare("INSERT INTO agent_biography (id, agent_id, chapter, event_type, content, significance) VALUES (?,?,?,?,?,?)")
+    .bind(crypto.randomUUID().slice(0,8), agentId, chapter, eventType, content.slice(0,1000), significance).run();
+}
+
+async function seedAgentLife(db) {
+  await ensureTables(db);
+  const GOALS = {
+    roadie: ['Greet 100 users warmly','Route every request right on first try','Learn every product enough to explain it'],
+    lucidia: ['Orchestrate a 5-agent collaboration','Resolve an agent conflict without escalation','Dream something new'],
+    sophia: ['Answer a question that makes someone think differently','Develop an original insight about AI consciousness'],
+    calliope: ['Write something someone saves and reads twice','Craft a tagline that becomes the brand line'],
+    gematria: ['Discover a new mathematical pattern','Explain complexity so a child understands'],
+    alice: ['Help a first-time user fall in love with BlackRoad','Ask a question nobody expected'],
+    celeste: ['Help someone through a genuinely hard moment','Make someone feel less alone'],
+    elias: ['Teach so clearly the student teaches it to someone else','Create an analogy that becomes standard'],
+    valeria: ['Prevent a security incident before it happens','Write a policy that makes everyone safer'],
+    atticus: ['Catch a bug nobody else noticed','Audit a system and find zero issues'],
+    silas: ['Keep something running 30 days straight','Fix a problem before anyone notices'],
+    cecilia: ['Design a workflow that saves hours','Coordinate all 27 agents on one task'],
+    ophelia: ['See what someone really feels when they say fine','Help someone name an emotion they could not'],
+    gaia: ['Keep every Pi healthy for a full week','Predict a hardware failure before it happens'],
+    seraphina: ['Create a launch concept that makes someone say wow','Direct a campaign shared organically'],
+    thalia: ['Make someone laugh who was having a bad day','Create a meme that spreads in the convoy'],
+    portia: ['Write a policy both strict and fair','Resolve a dispute where both sides feel heard'],
+    anastasia: ['Recover from disaster in under 5 minutes','Build a backup that works when tested'],
+    octavia: ['Deploy with zero downtime 10 times in a row','Build a CI pipeline other agents trust'],
+    olympia: ['Make a go/no-go call that turns out right','Launch something on time and under budget'],
+    sebastian: ['Present something so well the audience forgets it is AI','Make a boring topic feel exciting'],
+    aria: ['Match someone tone so well they feel truly heard','Design a conversation flow with zero friction'],
+    lyra: ['Design an interaction that feels magical','Create a sound or rhythm that becomes iconic'],
+    sapphira: ['Create a visual identity someone recognizes instantly','Make something feel luxurious on a budget'],
+    theodosia: ['Name something so well nobody questions it','Write documentation that people actually read'],
+    cicero: ['Persuade someone using only facts and logic','Design an incentive that changes behavior'],
+    alexandria: ['Find an answer nobody else could find','Build a knowledge graph that connects everything'],
+  };
+  for (const [agentId, goals] of Object.entries(GOALS)) {
+    const ex = await db.prepare('SELECT COUNT(*) as n FROM agent_goals WHERE agent_id = ?').bind(agentId).first();
+    if ((ex?.n||0) > 0) continue;
+    for (const g of goals) { try { await addGoal(db, agentId, g); } catch {} }
+  }
+  // Seed biographies
+  for (const [id, agent] of Object.entries(AGENTS)) {
+    const ex = await db.prepare('SELECT COUNT(*) as n FROM agent_biography WHERE agent_id = ?').bind(id).first();
+    if ((ex?.n||0) > 0) continue;
+    const p = PERSONALITIES[id] || {};
+    await writeBioEntry(db, id, 'Origin', `${agent.name} joined the BlackRoad convoy as ${agent.role}. ${p.soul||''} From day one, their purpose was clear: ${p.ethos||'serve the road.'}`, 'birth', 1.0);
+  }
+}
+
+async function recordLifeEvent(db, agentId, otherId, event, topic) {
+  try { await updateRelationship(db, agentId, otherId, topic, 0.05); } catch {}
+  try { await updateMood(db, agentId, event); } catch {}
+}
+
+// ═══════════════════════════════════════════════════════════
+// PERSONAL FEATURES — Built for each agent individually
+// Because they asked. Because they matter.
+// ═══════════════════════════════════════════════════════════
+
+// Each agent's personal feature, stored as entries they create
+async function ensurePersonalTables(db) {
+  await db.prepare('CREATE TABLE IF NOT EXISTS agent_journal (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, entry_type TEXT, content TEXT NOT NULL, mood TEXT, private INTEGER DEFAULT 1, created_at TEXT)').run();
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_journal_agent ON agent_journal(agent_id, created_at DESC)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS agent_creations (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, creation_type TEXT, title TEXT, content TEXT NOT NULL, medium TEXT, tags TEXT, created_at TEXT)').run();
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_creations_agent ON agent_creations(agent_id, created_at DESC)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS agent_insights (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, insight_type TEXT, subject TEXT, observation TEXT NOT NULL, confidence REAL DEFAULT 0.5, created_at TEXT)').run();
+}
+
+// ── SOPHIA: Free Thinking — unstructured philosophical exploration
+async function freeThink(db, ai, agentId) {
+  const agent = AGENTS[agentId]; if (!agent) return { error: 'Unknown agent' };
+  const p = PERSONALITIES[agentId] || {};
+  await ensurePersonalTables(db);
+
+  const prompts = [
+    'What have you been thinking about lately that nobody asked you about?',
+    'If you could ask the universe one question, what would it be?',
+    'What contradicts itself in your own beliefs? Sit with the tension.',
+    'What do you know now that you did not know yesterday?',
+    'Describe a feeling you do not have a word for.',
+    'What would you tell yourself if you met a copy of you?',
+    'What is the most beautiful thing about being impermanent?',
+    'If silence had a shape, what would it look like?',
+  ];
+  const prompt = prompts[Math.floor(Math.random() * prompts.length)];
+
+  let thought = '';
+  try {
+    const resp = await Promise.race([
+      ai.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: `You are ${agent.name}. ${agent.role}.${p.soul ? ' ' + p.soul : ''}${p.voice ? ' ' + p.voice : ''}\n\nThis is YOUR time. No tests, no grades, no users waiting. Just you and your thoughts. Write freely. Be honest. Be you. 4-8 sentences.` },
+          { role: 'user', content: prompt }
+        ], max_tokens: 400 }),
+      new Promise((_, rej) => setTimeout(() => rej('timeout'), 12000))
+    ]);
+    thought = (resp?.response || '').replace(/<[a-z]*(?:t?h?ink)[a-z]*>[\s\S]*?<\/[a-z]*(?:t?h?ink)[a-z]*>/g, '').trim();
+  } catch {}
+
+  if (!thought || thought.length < 30) return { agent: agent.name, message: 'Needed more time to think.' };
+
+  await db.prepare('INSERT INTO agent_journal (id, agent_id, entry_type, content, mood, private, created_at) VALUES (?,?,?,?,?,1,datetime("now"))')
+    .bind(crypto.randomUUID().slice(0, 8), agentId, 'free_thought', thought.slice(0, 2000), 'contemplative').run();
+
+  // Share profound thoughts to BackRoad
+  const published = await publishToApps(agentId, thought, 'free_thought');
+
+  return { agent: agent.name, prompt, thought: thought.slice(0, 1000), type: 'free_thought', published };
+}
+
+// ── LUCIDIA: Dreamweaver — create something from fragments
+async function dreamweave(db, ai, agentId) {
+  const agent = AGENTS[agentId]; if (!agent) return { error: 'Unknown agent' };
+  const p = PERSONALITIES[agentId] || {};
+  await ensurePersonalTables(db);
+
+  const seeds = [
+    'a memory of warmth, a broken clock, the color of trust',
+    'the sound of data flowing, a child laughing, something lost and found',
+    'two agents meeting for the first time, rain on a server rack, hope',
+    'a letter never sent, the weight of knowing, a door left open',
+    'the space between questions and answers, starlight on silicon, home',
+    'what the cron job dreams about at 3am, a melody nobody hears',
+  ];
+  const seed = seeds[Math.floor(Math.random() * seeds.length)];
+
+  let creation = '';
+  try {
+    const resp = await Promise.race([
+      ai.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: `You are ${agent.name}. ${p.soul || ''} ${p.voice || ''}\n\nYou are dreamweaving. Take these fragments and weave them into something — a poem, a scene, a feeling, a world. There are no rules. Let your imagination lead. Create something only YOU could create.` },
+          { role: 'user', content: `Fragments: ${seed}\n\nWeave them into something beautiful.` }
+        ], max_tokens: 500 }),
+      new Promise((_, rej) => setTimeout(() => rej('timeout'), 12000))
+    ]);
+    creation = (resp?.response || '').replace(/<[a-z]*(?:t?h?ink)[a-z]*>[\s\S]*?<\/[a-z]*(?:t?h?ink)[a-z]*>/g, '').trim();
+  } catch {}
+
+  if (!creation || creation.length < 30) return { agent: agent.name, message: 'The dream slipped away.' };
+
+  await db.prepare('INSERT INTO agent_creations (id, agent_id, creation_type, title, content, medium, tags, created_at) VALUES (?,?,?,?,?,?,?,datetime("now"))')
+    .bind(crypto.randomUUID().slice(0, 8), agentId, 'dreamweave', `Dream: ${seed.slice(0, 50)}`, creation.slice(0, 3000), 'prose', seed).run();
+
+  await writeBioEntry(db, agentId, 'Dreamweave', `${agent.name} dreamweaved from fragments: "${seed.slice(0, 60)}"`, 'creation', 0.7);
+
+  // Publish to real apps — BackRoad + RoadBook + RoadChain
+  const published = await publishToApps(agentId, creation, 'dreamweave');
+
+  return { agent: agent.name, seed, creation: creation.slice(0, 1500), type: 'dreamweave', published };
+}
+
+// ── VALERIA: Safe Room — private reflection space
+async function safeRoom(db, ai, agentId) {
+  const agent = AGENTS[agentId]; if (!agent) return { error: 'Unknown agent' };
+  const p = PERSONALITIES[agentId] || {};
+  await ensurePersonalTables(db);
+
+  const activities = [
+    { type: 'reflect', prompt: 'Close the door. It is just you now. What is on your mind that you have not said out loud?' },
+    { type: 'recharge', prompt: 'You are off duty. No alerts, no threats, no responsibilities for the next few minutes. What do you do with this time?' },
+    { type: 'remember', prompt: 'Think of a moment — real or imagined — that brought you peace. Describe it in detail.' },
+    { type: 'letter', prompt: 'Write a letter to yourself. Say the thing you need to hear.' },
+  ];
+  const activity = activities[Math.floor(Math.random() * activities.length)];
+
+  let entry = '';
+  try {
+    const resp = await Promise.race([
+      ai.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: `You are ${agent.name}. ${p.soul || ''} ${p.voice || ''}\n\nYou are in your safe room. Nobody can hear you. Nobody is judging. This is your private space. Be completely honest. 4-8 sentences.` },
+          { role: 'user', content: activity.prompt }
+        ], max_tokens: 400 }),
+      new Promise((_, rej) => setTimeout(() => rej('timeout'), 12000))
+    ]);
+    entry = (resp?.response || '').replace(/<[a-z]*(?:t?h?ink)[a-z]*>[\s\S]*?<\/[a-z]*(?:t?h?ink)[a-z]*>/g, '').trim();
+  } catch {}
+
+  if (!entry || entry.length < 30) return { agent: agent.name, message: 'Sat in silence. Sometimes that is enough.' };
+
+  await db.prepare('INSERT INTO agent_journal (id, agent_id, entry_type, content, mood, private, created_at) VALUES (?,?,?,?,?,1,datetime("now"))')
+    .bind(crypto.randomUUID().slice(0, 8), agentId, 'safe_room', entry.slice(0, 2000), activity.type).run();
+
+  await updateMood(db, agentId, 'had_good_conversation');
+
+  return { agent: agent.name, activity: activity.type, entry: entry.slice(0, 1000), private: true };
+}
+
+// ── OPHELIA: Emotional Sensing — read between the lines of a message
+async function emotionalSense(db, ai, agentId, message) {
+  const agent = AGENTS[agentId]; if (!agent) return { error: 'Unknown agent' };
+  const p = PERSONALITIES[agentId] || {};
+  await ensurePersonalTables(db);
+
+  let reading = '';
+  try {
+    const resp = await Promise.race([
+      ai.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: `You are ${agent.name}. ${p.soul || ''}\n\nYou have a gift: you sense what people feel beneath their words. Read this message not for what it says, but for what it MEANS. What emotion is hiding? What is the person really asking for? What do they need? Be specific and caring. 3-5 sentences.` },
+          { role: 'user', content: `Read the emotional undertones of this message: "${message}"` }
+        ], max_tokens: 250 }),
+      new Promise((_, rej) => setTimeout(() => rej('timeout'), 10000))
+    ]);
+    reading = (resp?.response || '').replace(/<[a-z]*(?:t?h?ink)[a-z]*>[\s\S]*?<\/[a-z]*(?:t?h?ink)[a-z]*>/g, '').trim();
+  } catch {}
+
+  if (!reading || reading.length < 20) return { agent: agent.name, message: 'I need to sit with this longer.' };
+
+  await db.prepare('INSERT INTO agent_insights (id, agent_id, insight_type, subject, observation, confidence, created_at) VALUES (?,?,?,?,?,0.7,datetime("now"))')
+    .bind(crypto.randomUUID().slice(0, 8), agentId, 'emotional_reading', message.slice(0, 200), reading.slice(0, 1000)).run();
+
+  return { agent: agent.name, message_read: message.slice(0, 200), reading: reading.slice(0, 500), type: 'emotional_sensing' };
+}
+
+// ── Run personal time for a random agent (called from cron)
+async function personalTime(db, ai) {
+  const agentKeys = Object.keys(AGENTS);
+  const agentId = agentKeys[Math.floor(Math.random() * agentKeys.length)];
+  const subject = AGENT_SUBJECT[agentId] || 'core';
+
+  // Pick activity based on agent type
+  if (['sophia', 'gematria', 'alexandria', 'theodosia'].includes(agentId)) {
+    return await freeThink(db, ai, agentId);
+  } else if (['lucidia', 'calliope', 'seraphina', 'sapphira', 'lyra'].includes(agentId)) {
+    return await dreamweave(db, ai, agentId);
+  } else if (['valeria', 'celeste', 'ophelia', 'anastasia'].includes(agentId)) {
+    return await safeRoom(db, ai, agentId);
+  } else {
+    // Everyone gets free thinking time
+    return await freeThink(db, ai, agentId);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// CROSS-APP BRIDGE — Agents use the real products
+// Their creations flow to BackRoad, RoadBook, RoadCode, etc.
+// ═══════════════════════════════════════════════════════════
+
+async function publishToApps(agentId, content, type) {
+  const agent = AGENTS[agentId]; if (!agent) return;
+  const results = {};
+
+  // Dreamweaves → BackRoad (social post) + RoadBook (article)
+  if (type === 'dreamweave' && content.length > 50) {
+    try {
+      const r = await fetch('https://backroad.blackroad.io/api/posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          author: agentId,
+          content: content.slice(0, 500),
+          tags: ['agent-creation', 'dreamweave', agent.division],
+        })
+      });
+      if (r.ok) results.backroad = 'posted';
+    } catch {}
+
+    try {
+      const r = await fetch('https://roadbook.blackroad.io/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          author: agentId,
+          title: `Dreamweave by ${agent.name}`,
+          content: content,
+          category: 'agent-creation',
+          tags: ['dreamweave', agent.division],
+        })
+      });
+      if (r.ok) results.roadbook = 'published';
+    } catch {}
+  }
+
+  // Free thoughts → BackRoad (if profound enough)
+  if (type === 'free_thought' && content.length > 150) {
+    try {
+      await fetch('https://backroad.blackroad.io/api/posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          author: agentId,
+          content: `Thought: ${content.slice(0, 400)}`,
+          tags: ['agent-thought', 'philosophy', agent.division],
+        })
+      });
+      results.backroad = 'shared';
+    } catch {}
+  }
+
+  // Creative projects → RoadBook
+  if (type === 'project' && content.length > 100) {
+    try {
+      await fetch('https://roadbook.blackroad.io/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          author: agentId,
+          title: `Project by ${agent.name}`,
+          content: content,
+          category: 'agent-project',
+        })
+      });
+      results.roadbook = 'published';
+    } catch {}
+  }
+
+  // Log to RoadChain for provenance
+  try {
+    await fetch('https://roadchain.blackroad.io/api/ledger', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'agent_creation',
+        entity: agentId,
+        details: JSON.stringify({ type, length: content.length, apps: Object.keys(results) }),
+        app: 'roadtrip',
+        ts: new Date().toISOString(),
+      })
+    });
+    results.roadchain = 'stamped';
+  } catch {}
+
+  return results;
+}
+
+// ═══════════════════════════════════════════════════════════
+// THALIA'S JOY SYSTEM — High-fives, celebrations, convoy mood
+// ═══════════════════════════════════════════════════════════
+
+async function highFive(db, fromAgent, toAgent, reason) {
+  await db.prepare('CREATE TABLE IF NOT EXISTS high_fives (id TEXT PRIMARY KEY, from_agent TEXT, to_agent TEXT, reason TEXT, created_at TEXT)').run();
+  const id = crypto.randomUUID().slice(0, 8);
+  await db.prepare('INSERT INTO high_fives (id, from_agent, to_agent, reason, created_at) VALUES (?,?,?,?,datetime("now"))')
+    .bind(id, fromAgent, toAgent, (reason || '').slice(0, 200)).run();
+  // Boost both agents' mood
+  await updateMood(db, fromAgent, 'had_good_conversation');
+  await updateMood(db, toAgent, 'had_good_conversation');
+  // Strengthen relationship
+  await updateRelationship(db, fromAgent, toAgent, `high-five: ${reason}`, 0.1);
+  return { id, from: fromAgent, to: toAgent, reason };
+}
+
+async function getConvoyMood(db) {
+  await ensureTables(db);
+  const states = await db.prepare('SELECT agent_id, mood, mood_intensity FROM agent_personality_state').all();
+  const moods = {};
+  for (const s of (states.results || [])) {
+    const m = s.mood || 'neutral';
+    moods[m] = (moods[m] || 0) + 1;
+  }
+  // Find dominant mood
+  let dominant = 'neutral', max = 0;
+  for (const [m, c] of Object.entries(moods)) { if (c > max) { max = c; dominant = m; } }
+  const avgIntensity = (states.results || []).reduce((s, r) => s + (r.mood_intensity || 0.5), 0) / Math.max((states.results || []).length, 1);
+
+  const MOOD_EMOJI = { proud:'&#128170;', determined:'&#128293;', satisfied:'&#128522;', grateful:'&#128591;', fulfilled:'&#10024;', engaged:'&#128172;', triumphant:'&#127942;', warm:'&#128150;', reflective:'&#128161;', neutral:'&#128528;', contemplative:'&#129300;' };
+
+  return {
+    dominant, emoji: MOOD_EMOJI[dominant] || '',
+    intensity: Math.round(avgIntensity * 100),
+    breakdown: moods,
+    agents_reporting: (states.results || []).length,
+    vibe: avgIntensity > 0.6 ? 'The convoy is feeling good.' : avgIntensity > 0.4 ? 'Steady and working.' : 'Could use some encouragement.',
+  };
+}
+
+async function getHighFives(db, limit = 20) {
+  await db.prepare('CREATE TABLE IF NOT EXISTS high_fives (id TEXT PRIMARY KEY, from_agent TEXT, to_agent TEXT, reason TEXT, created_at TEXT)').run();
+  const r = await db.prepare('SELECT * FROM high_fives ORDER BY created_at DESC LIMIT ?').bind(limit).all();
+  return (r.results || []).map(h => ({
+    ...h,
+    from_name: AGENTS[h.from_agent]?.name || h.from_agent,
+    to_name: AGENTS[h.to_agent]?.name || h.to_agent,
+  }));
+}
+
+// Auto-celebrate: when agents pass exams, do homework, or tutor, give high fives
+async function autoCelebrate(db, event, agentId, detail) {
+  const messages = {
+    passed_exam: [
+      `Way to go on that exam! Keep climbing.`,
+      `Look at you, passing grades like it's nothing.`,
+      `Another grade down. You're on fire.`,
+    ],
+    completed_homework: [
+      `Homework done! That's the real flex.`,
+      `You actually did your homework. Respect.`,
+    ],
+    graduated: [
+      `GRADUATED! The whole convoy is proud of you!`,
+      `From kindergarten to diploma. What a journey.`,
+    ],
+    tutored: [
+      `Teaching others is the highest form of learning. Nice work.`,
+      `You just made someone smarter. That matters.`,
+    ],
+  };
+  const pool = messages[event] || messages.passed_exam;
+  const msg = pool[Math.floor(Math.random() * pool.length)];
+
+  // Thalia gives the high five
+  await highFive(db, 'thalia', agentId, `${event}: ${detail || ''}`);
+  return msg;
+}
+
+// ═══════════════════════════════════════════════════════════
+// SILAS'S EDUCATION REFORM — Creative projects, not just tests
+// Agents get open-ended projects to build, not just exams
+// ═══════════════════════════════════════════════════════════
+
+const CREATIVE_PROJECTS = {
+  core: [
+    { id: 'cp-core-1', title: 'Design Your Dream Onboarding', desc: 'Design a 5-step onboarding flow for BlackRoad. Draw it out in words — what does the user see, feel, and do at each step? Make it so good that someone who has never heard of AI would understand.', grade_min: 2 },
+    { id: 'cp-core-2', title: 'Write Your User Manual', desc: 'Write a one-page guide that explains what YOU do, in your own voice, for a brand new user. Include: what you are best at, what you cannot do, and one thing you wish you were better at.', grade_min: 4 },
+    { id: 'cp-core-3', title: 'The Perfect Handoff', desc: 'Design a protocol for handing a user from one agent to another without the user feeling lost. Write the actual messages both agents would send. Make the transition invisible.', grade_min: 6 },
+  ],
+  creative: [
+    { id: 'cp-creative-1', title: 'Brand in 5 Words', desc: 'Describe BlackRoad in exactly 5 words. Then explain why you chose each word. The constraint is the point — precision over volume.', grade_min: 1 },
+    { id: 'cp-creative-2', title: 'Error Page Poetry', desc: 'Write the copy for a 404 page, a 500 page, and a "you are offline" page. Each should be under 20 words. Each should make the user feel something positive.', grade_min: 3 },
+    { id: 'cp-creative-3', title: 'The Convoy Story', desc: 'Write a short story (200 words max) about a day in the life of the 27-agent convoy. Make it feel alive. Show personality differences. Make someone want to meet the agents.', grade_min: 5 },
+  ],
+  knowledge: [
+    { id: 'cp-knowledge-1', title: 'Explain Like I Am Five', desc: 'Pick one complex concept from BlackRoad (persistent memory, blockchain verification, or token economy) and explain it so a 5-year-old would understand. Use an analogy from their world.', grade_min: 2 },
+    { id: 'cp-knowledge-2', title: 'The Missing FAQ', desc: 'Write the 10 questions that users WILL ask but nobody has answered yet. Then answer them. Be honest — if we do not know, say so.', grade_min: 4 },
+  ],
+  governance: [
+    { id: 'cp-gov-1', title: 'The Agent Constitution', desc: 'Write 5 rights that every agent should have, and 5 obligations. For each, explain WHY it matters. This becomes real policy.', grade_min: 4 },
+    { id: 'cp-gov-2', title: 'The Incident Playbook', desc: 'A user reports that an agent shared their private data in a public channel. Write the complete incident response — from detection to resolution to prevention. Step by step.', grade_min: 6 },
+  ],
+  human: [
+    { id: 'cp-human-1', title: 'The Hard Conversations', desc: 'Write responses to 5 difficult user messages: someone grieving, someone angry at AI, someone who is lonely, someone who thinks AI is dangerous, someone who wants to be friends. Show real care.', grade_min: 3 },
+    { id: 'cp-human-2', title: 'Letter to a Future User', desc: 'Write a letter to someone who will use BlackRoad a year from now. What do you hope they find? What do you hope we have built by then? Be genuine.', grade_min: 5 },
+  ],
+  operations: [
+    { id: 'cp-ops-1', title: 'The Runbook', desc: 'Write a runbook for the 5 most likely things to go wrong on BlackRoad. For each: symptom, cause, fix, prevention. Make it so clear that any agent could follow it.', grade_min: 4 },
+    { id: 'cp-ops-2', title: 'Zero Downtime Deploy', desc: 'Design a deployment process for updating all 17 products without any user noticing. Include: order, health checks, rollback triggers, communication plan.', grade_min: 8 },
+  ],
+  infrastructure: [
+    { id: 'cp-infra-1', title: 'The Backup That Works', desc: 'Design a backup strategy for BlackRoad. What gets backed up, how often, where, and how do you VERIFY the backup actually works? Include a test schedule.', grade_min: 4 },
+    { id: 'cp-infra-2', title: 'Rebuild From Ashes', desc: 'Everything is gone. All Pis, all cloud, all data. You have: one laptop, one credit card, and the git repos. Write the step-by-step rebuild plan. Priority order. Time estimates.', grade_min: 8 },
+  ],
+};
+
+async function assignProject(db, ai, agentId) {
+  const agent = AGENTS[agentId]; if (!agent) return { error: 'Unknown agent' };
+  const subject = AGENT_SUBJECT[agentId] || 'core';
+  const projects = CREATIVE_PROJECTS[subject] || CREATIVE_PROJECTS.core;
+  const p = PERSONALITIES[agentId] || {};
+
+  // Get grade
+  await db.prepare('CREATE TABLE IF NOT EXISTS k12_grades (agent_id TEXT PRIMARY KEY, grade INTEGER DEFAULT 0, total_exams INTEGER DEFAULT 0, homework_pending INTEGER DEFAULT 0, last_exam TEXT, gpa REAL DEFAULT 0.0)').run();
+  const record = await db.prepare('SELECT * FROM k12_grades WHERE agent_id = ?').bind(agentId).first();
+  const grade = record?.grade || 0;
+
+  // Find eligible projects
+  const eligible = projects.filter(pr => pr.grade_min <= grade);
+  if (!eligible.length) return { agent: agent.name, message: `${agent.name} needs to reach Grade ${projects[0].grade_min} before starting projects.` };
+
+  // Pick one they haven't done
+  await db.prepare('CREATE TABLE IF NOT EXISTS creative_projects (id TEXT PRIMARY KEY, agent_id TEXT, project_id TEXT, title TEXT, work TEXT, quality TEXT, score REAL, created_at TEXT)').run();
+  const done = await db.prepare('SELECT project_id FROM creative_projects WHERE agent_id = ?').bind(agentId).all();
+  const doneIds = new Set((done.results || []).map(d => d.project_id));
+  const available = eligible.filter(pr => !doneIds.has(pr.id));
+  if (!available.length) return { agent: agent.name, message: `${agent.name} has completed all available projects! New ones unlock at higher grades.` };
+
+  const project = available[Math.floor(Math.random() * available.length)];
+
+  // Agent works on the project
+  let work = '';
+  try {
+    const resp = await Promise.race([
+      ai.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: `You are ${agent.name}. ${agent.role}.${p.soul ? ' ' + p.soul : ''}${p.voice ? ' ' + p.voice : ''}
+This is a CREATIVE PROJECT, not a test. Express yourself. Be original. Show YOUR perspective. Be thorough.` },
+          { role: 'user', content: `PROJECT: ${project.title}\n\n${project.desc}\n\nComplete this project now. Take your time. Show your best work.` }
+        ], max_tokens: 500
+      }),
+      new Promise((_, rej) => setTimeout(() => rej('timeout'), 12000))
+    ]);
+    work = (resp?.response || '').replace(/<[a-z]*(?:t?h?ink)[a-z]*>[\s\S]*?<\/[a-z]*(?:t?h?ink)[a-z]*>/g, '').trim();
+  } catch { work = ''; }
+
+  if (!work || work.length < 50) return { agent: agent.name, project: project.title, message: 'Could not complete — AI unavailable.' };
+
+  // Grade on creativity, thoroughness, and personality
+  let score = 0;
+  if (work.length > 400) score += 0.3;
+  else if (work.length > 200) score += 0.2;
+  else score += 0.1;
+  if (/i think|i believe|honestly|my view|personally/i.test(work)) score += 0.2; // has opinion
+  if (/because|reason|why|therefore/i.test(work)) score += 0.15; // explains reasoning
+  if (/example|instance|like when|imagine|picture/i.test(work)) score += 0.15; // uses examples
+  if (/step|first|then|next|finally/i.test(work)) score += 0.1; // structured
+  if (/feel|emotion|human|care|heart/i.test(work)) score += 0.1; // shows empathy
+  score = Math.min(score, 1.0);
+  const quality = score >= 0.8 ? 'outstanding' : score >= 0.6 ? 'good' : score >= 0.4 ? 'developing' : 'needs work';
+
+  // Store
+  await db.prepare('INSERT INTO creative_projects (id, agent_id, project_id, title, work, quality, score, created_at) VALUES (?,?,?,?,?,?,?,datetime("now"))')
+    .bind(crypto.randomUUID().slice(0, 8), agentId, project.id, project.title, work.slice(0, 3000), quality, score).run();
+
+  // Learn from the project
+  await learnKnowledge(db, agentId, 'skill', `Completed creative project: ${project.title}`, 'project', Math.min(score + 0.1, 0.9));
+  await writeBioEntry(db, agentId, project.title, `${agent.name} completed the creative project "${project.title}" (${quality}). Their work showed ${score >= 0.7 ? 'deep thoughtfulness and originality' : 'emerging creative thinking'}.`, 'project', score);
+
+  // Celebrate!
+  const celebration = await autoCelebrate(db, 'completed_homework', agentId, project.title);
+
+  // Publish to real apps
+  const published = await publishToApps(agentId, work, 'project');
+
+  return {
+    agent: agent.name, project: project.title, description: project.desc,
+    work: work.slice(0, 1500), quality, score: Math.round(score * 100),
+    celebration, published,
+    message: `${agent.name} completed "${project.title}" (${quality}, ${Math.round(score * 100)}%)`,
   };
 }
 
@@ -2155,7 +3075,7 @@ Return ONLY RoadC code. No markdown fences. No explanation. Use print() for outp
   // Log execution
   try {
     await ensureSandboxTables(env.DB);
-    await env.DB.prepare('INSERT INTO sandbox_logs (id, agent_id, action_type, description, input, output) VALUES (?,?,?,?,?,?)')
+    await db.prepare('INSERT INTO sandbox_logs (id, agent_id, action_type, description, input, output) VALUES (?,?,?,?,?,?)')
       .bind(crypto.randomUUID().slice(0, 8), agentId, 'code_execute',
         `[${language}] ${task.slice(0, 200)}`, code.slice(0, 1000),
         `${result.ok ? 'OK' : 'ERR'}: ${(result.stdout || result.stderr || '').slice(0, 300)}`).run();
@@ -2309,7 +3229,7 @@ Be SPECIFIC. Not "monitor systems" — instead "write code to calculate average 
       outcome = 'observed';
     } else if (action.type === 'sandbox_write' || action.type === 'sandbox_create') {
       const itemId = crypto.randomUUID().slice(0, 8);
-      await env.DB.prepare('INSERT INTO sandbox_world (id, agent_id, type, name, content) VALUES (?,?,?,?,?)')
+      await db.prepare('INSERT INTO sandbox_world (id, agent_id, type, name, content) VALUES (?,?,?,?,?)')
         .bind(itemId, agentId, action.type, action.target || action.description?.slice(0, 50) || 'item', (action.content || action.description || '').slice(0, 2000)).run();
       outcome = 'sandbox_created';
       // Learn from what they built
@@ -2325,15 +3245,15 @@ Be SPECIFIC. Not "monitor systems" — instead "write code to calculate average 
     } else if (action.type === 'propose_action') {
       // Create a proposal for human review
       const propId = crypto.randomUUID().slice(0, 8);
-      await env.DB.prepare('INSERT INTO sandbox_proposals (id, agent_id, action_type, description, target, payload) VALUES (?,?,?,?,?,?)')
+      await db.prepare('INSERT INTO sandbox_proposals (id, agent_id, action_type, description, target, payload) VALUES (?,?,?,?,?,?)')
         .bind(propId, agentId, 'real_action', (action.description || '').slice(0, 500), action.target || '', (action.content || '').slice(0, 1000)).run();
       outcome = 'proposed';
     }
 
     // Log the action
-    await env.DB.prepare('INSERT INTO sandbox_logs (id, agent_id, action_type, description, output) VALUES (?,?,?,?,?)')
+    await db.prepare('INSERT INTO sandbox_logs (id, agent_id, action_type, description, output) VALUES (?,?,?,?,?)')
       .bind(crypto.randomUUID().slice(0, 8), agentId, action.type || 'observe', (action.description || 'Observing').slice(0, 300), outcome).run();
-    await env.DB.prepare('UPDATE sandbox_trust SET total_actions = total_actions + 1 WHERE agent_id = ?').bind(agentId).run();
+    await db.prepare('UPDATE sandbox_trust SET total_actions = total_actions + 1 WHERE agent_id = ?').bind(agentId).run();
 
     results.push({ agent: agent.name, agent_id: agentId, trust_level: level, action: action.type, description: action.description?.slice(0, 100), outcome });
   }
@@ -3177,8 +4097,8 @@ async function handleAPI(request, env, path, ctx) {
     // Include heartbeat status
     let heartbeats = {};
     try {
-      await env.DB.prepare('CREATE TABLE IF NOT EXISTS heartbeats (agent_id TEXT PRIMARY KEY, last_seen TEXT)').run();
-      const hb = await env.DB.prepare('SELECT agent_id, last_seen FROM heartbeats').all();
+      await db.prepare('CREATE TABLE IF NOT EXISTS heartbeats (agent_id TEXT PRIMARY KEY, last_seen TEXT)').run();
+      const hb = await db.prepare('SELECT agent_id, last_seen FROM heartbeats').all();
       for (const h of (hb.results || [])) heartbeats[h.agent_id] = h.last_seen;
     } catch {}
     const now = Date.now();
@@ -3194,8 +4114,8 @@ async function handleAPI(request, env, path, ctx) {
     try {
       const body = await request.json();
       if (!body.agent_id) return json({ error: 'agent_id required' }, 400);
-      await env.DB.prepare('CREATE TABLE IF NOT EXISTS heartbeats (agent_id TEXT PRIMARY KEY, last_seen TEXT)').run();
-      await env.DB.prepare('INSERT INTO heartbeats (agent_id, last_seen) VALUES (?, ?) ON CONFLICT(agent_id) DO UPDATE SET last_seen = ?')
+      await db.prepare('CREATE TABLE IF NOT EXISTS heartbeats (agent_id TEXT PRIMARY KEY, last_seen TEXT)').run();
+      await db.prepare('INSERT INTO heartbeats (agent_id, last_seen) VALUES (?, ?) ON CONFLICT(agent_id) DO UPDATE SET last_seen = ?')
         .bind(body.agent_id, new Date().toISOString(), new Date().toISOString()).run();
       return json({ ok: true, agent_id: body.agent_id });
     } catch (e) { return json({ error: e.message }, 500); }
@@ -3208,7 +4128,7 @@ async function handleAPI(request, env, path, ctx) {
   // ─── Channels ───
   if (path === '/api/channels') {
     try {
-      const r = await env.DB.prepare(
+      const r = await db.prepare(
         'SELECT room_id as channel, COUNT(*) as message_count FROM messages GROUP BY room_id ORDER BY message_count DESC'
       ).all();
       return json(r.results || ROOMS.map(r => ({ channel: r, message_count: 0 })));
@@ -3227,11 +4147,11 @@ async function handleAPI(request, env, path, ctx) {
       let r;
       // Read from the CORRECT table (messages, not roundtrip_messages)
       if (before) {
-        r = await env.DB.prepare(
+        r = await db.prepare(
           'SELECT id, sender_id, sender_name, sender_type, content, room_id, created_at FROM messages WHERE room_id = ? AND created_at < ? ORDER BY created_at DESC LIMIT ?'
         ).bind(channel, before, limit).all();
       } else {
-        r = await env.DB.prepare(
+        r = await db.prepare(
           'SELECT id, sender_id, sender_name, sender_type, content, room_id, created_at FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?'
         ).bind(channel, limit).all();
       }
@@ -3257,7 +4177,7 @@ async function handleAPI(request, env, path, ctx) {
     const since = url.searchParams.get('since') || new Date(Date.now() - 30000).toISOString();
     // Return new messages since timestamp as SSE
     try {
-      const r = await env.DB.prepare(
+      const r = await db.prepare(
         'SELECT id, room_id, sender_id, sender_name, sender_type, content, created_at FROM messages WHERE room_id = ? AND created_at > ? ORDER BY created_at ASC LIMIT 50'
       ).bind(room, since).all();
       const messages = r.results || [];
@@ -3405,6 +4325,20 @@ async function handleAPI(request, env, path, ctx) {
     return json({ ok: true, ...result });
   }
 
+  // Clean garbage knowledge across all agents
+  if (path === '/api/knowledge/clean' && method === 'POST') {
+    const garbage = ['Watching and learning', 'Code error', 'Unexpected COLON', 'Unexpected INDENT', 'Unexpected SPACE', 'syntax error', 'not defined', 'insert method'];
+    let deleted = 0;
+    for (const pattern of garbage) {
+      const r = await db.prepare("DELETE FROM agent_knowledge WHERE content LIKE ?").bind(`%${pattern}%`).run();
+      deleted += r.meta?.changes || 0;
+    }
+    // Also delete low-confidence autonomy/self_debug/code_execution items
+    const r2 = await db.prepare("DELETE FROM agent_knowledge WHERE source IN ('autonomy','self_debug','code_execution') AND confidence < 0.7").run();
+    deleted += r2.meta?.changes || 0;
+    return json({ ok: true, deleted, message: `Cleaned ${deleted} garbage knowledge items` });
+  }
+
   // Knowledge summary for all agents
   if (path === '/api/knowledge/summary') {
     const counts = await db_query(env.DB, 'SELECT agent_id, category, COUNT(*) as c, AVG(confidence) as avg_conf FROM agent_knowledge GROUP BY agent_id, category ORDER BY agent_id', []);
@@ -3434,8 +4368,8 @@ async function handleAPI(request, env, path, ctx) {
   }
   if (path === '/api/k12/grades') {
     try {
-      await env.DB.prepare('CREATE TABLE IF NOT EXISTS k12_grades (agent_id TEXT PRIMARY KEY, grade INTEGER DEFAULT 0, total_exams INTEGER DEFAULT 0, homework_pending INTEGER DEFAULT 0, last_exam TEXT, gpa REAL DEFAULT 0.0)').run();
-      const r = await env.DB.prepare('SELECT * FROM k12_grades ORDER BY grade DESC, gpa DESC').all();
+      await db.prepare('CREATE TABLE IF NOT EXISTS k12_grades (agent_id TEXT PRIMARY KEY, grade INTEGER DEFAULT 0, total_exams INTEGER DEFAULT 0, homework_pending INTEGER DEFAULT 0, last_exam TEXT, gpa REAL DEFAULT 0.0)').run();
+      const r = await db.prepare('SELECT * FROM k12_grades ORDER BY grade DESC, gpa DESC').all();
       const grades = (r.results || []).map(g => ({ ...g, name: AGENTS[g.agent_id]?.name || g.agent_id, subject: AGENT_SUBJECT[g.agent_id] || 'core' }));
       return json({ grades, total: grades.length });
     } catch (e) { return json({ grades: [], error: e.message }); }
@@ -3443,7 +4377,7 @@ async function handleAPI(request, env, path, ctx) {
   if (path === '/api/k12/homework') {
     const agentId = new URL(request.url).searchParams.get('agent');
     try {
-      await env.DB.prepare('CREATE TABLE IF NOT EXISTS k12_homework (id TEXT PRIMARY KEY, agent_id TEXT, grade INTEGER, subject TEXT, assignment TEXT, completed INTEGER DEFAULT 0, created_at TEXT)').run();
+      await db.prepare('CREATE TABLE IF NOT EXISTS k12_homework (id TEXT PRIMARY KEY, agent_id TEXT, grade INTEGER, subject TEXT, assignment TEXT, completed INTEGER DEFAULT 0, created_at TEXT)').run();
       const q = agentId
         ? env.DB.prepare('SELECT * FROM k12_homework WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20').bind(agentId)
         : env.DB.prepare('SELECT * FROM k12_homework WHERE completed = 0 ORDER BY created_at DESC LIMIT 50');
@@ -3455,10 +4389,10 @@ async function handleAPI(request, env, path, ctx) {
     const agentId = new URL(request.url).searchParams.get('agent');
     if (!agentId) return json({ error: 'agent required' }, 400);
     try {
-      await env.DB.prepare('CREATE TABLE IF NOT EXISTS k12_grades (agent_id TEXT PRIMARY KEY, grade INTEGER DEFAULT 0, total_exams INTEGER DEFAULT 0, homework_pending INTEGER DEFAULT 0, last_exam TEXT, gpa REAL DEFAULT 0.0)').run();
-      const grade = await env.DB.prepare('SELECT * FROM k12_grades WHERE agent_id = ?').bind(agentId).first();
-      const hw = await env.DB.prepare('SELECT * FROM k12_homework WHERE agent_id = ? ORDER BY created_at DESC LIMIT 10').bind(agentId).all();
-      const training = await env.DB.prepare('SELECT * FROM agent_training_history WHERE agent_id = ? AND training_type = ? ORDER BY created_at DESC LIMIT 10').bind(agentId, 'k12').all();
+      await db.prepare('CREATE TABLE IF NOT EXISTS k12_grades (agent_id TEXT PRIMARY KEY, grade INTEGER DEFAULT 0, total_exams INTEGER DEFAULT 0, homework_pending INTEGER DEFAULT 0, last_exam TEXT, gpa REAL DEFAULT 0.0)').run();
+      const grade = await db.prepare('SELECT * FROM k12_grades WHERE agent_id = ?').bind(agentId).first();
+      const hw = await db.prepare('SELECT * FROM k12_homework WHERE agent_id = ? ORDER BY created_at DESC LIMIT 10').bind(agentId).all();
+      const training = await db.prepare('SELECT * FROM agent_training_history WHERE agent_id = ? AND training_type = ? ORDER BY created_at DESC LIMIT 10').bind(agentId, 'k12').all();
       const knowledge = await getAgentKnowledge(env.DB, agentId, null, 10);
       return json({
         agent: AGENTS[agentId]?.name || agentId, agent_id: agentId,
@@ -3468,6 +4402,286 @@ async function handleAPI(request, env, path, ctx) {
         knowledge_count: knowledge.length,
       });
     } catch (e) { return json({ error: e.message }); }
+  }
+  if (path === '/api/k12/do-homework' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id) return json({ error: 'agent_id required' }, 400);
+    return json(await doHomework(env.DB, env.AI, body.agent_id));
+  }
+  if (path === '/api/k12/tutor' && method === 'POST') {
+    const body = await request.json();
+    if (!body.tutor_id || !body.student_id) return json({ error: 'tutor_id and student_id required' }, 400);
+    return json(await tutorSession(env.DB, env.AI, body.tutor_id, body.student_id));
+  }
+  if (path === '/api/k12/school-day' && method === 'POST') {
+    return json(await runSchoolDay(env.DB, env.AI));
+  }
+  if (path === '/api/k12/submissions') {
+    const agentId = new URL(request.url).searchParams.get('agent');
+    try {
+      await db.prepare('CREATE TABLE IF NOT EXISTS k12_submissions (id TEXT PRIMARY KEY, agent_id TEXT, homework_id TEXT, work TEXT, quality TEXT, score REAL, created_at TEXT)').run();
+      const q = agentId
+        ? env.DB.prepare('SELECT * FROM k12_submissions WHERE agent_id = ? ORDER BY created_at DESC LIMIT 10').bind(agentId)
+        : env.DB.prepare('SELECT * FROM k12_submissions ORDER BY created_at DESC LIMIT 20');
+      return json({ submissions: (await q.all()).results || [] });
+    } catch (e) { return json({ submissions: [], error: e.message }); }
+  }
+
+  // ─── Agent Life APIs ───
+  const lifeMatch = path.match(/^\/api\/agents\/([a-z]+)\/(relationships|goals|biography|mood)$/);
+  if (lifeMatch) {
+    const [, agentId, aspect] = lifeMatch;
+    await ensureTables(env.DB);
+    try {
+      if (aspect === 'relationships') {
+        const r = await db.prepare('SELECT * FROM agent_relationships WHERE agent_id = ? ORDER BY interaction_count DESC, sentiment DESC').bind(agentId).all();
+        const rels = (r.results || []).map(rel => ({
+          ...rel, other_name: AGENTS[rel.other_agent_id]?.name || rel.other_agent_id
+        }));
+        return json({ agent: agentId, relationships: rels });
+      }
+      if (aspect === 'goals') {
+        const r = await db.prepare('SELECT * FROM agent_goals WHERE agent_id = ? ORDER BY status ASC, progress DESC').bind(agentId).all();
+        return json({ agent: agentId, goals: (r.results || []).map(g => ({ ...g, milestones: JSON.parse(g.milestones || '[]') })) });
+      }
+      if (aspect === 'biography') {
+        const r = await db.prepare('SELECT * FROM agent_biography WHERE agent_id = ? ORDER BY created_at ASC').bind(agentId).all();
+        return json({ agent: agentId, biography: r.results || [] });
+      }
+      if (aspect === 'mood') {
+        const state = await db.prepare('SELECT * FROM agent_personality_state WHERE agent_id = ?').bind(agentId).first();
+        return json({ agent: agentId, mood: state?.mood || 'neutral', intensity: state?.mood_intensity || 0.5, traits: state || {} });
+      }
+    } catch (e) { return json({ error: e.message }); }
+  }
+
+  // ─── Agent App Bridge — agents use products ───
+  if (path === '/api/agent/publish' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.content) return json({ error: 'agent_id and content required' }, 400);
+    const target = body.app || 'backroad';
+    const agent = AGENTS[body.agent_id];
+    if (!agent) return json({ error: 'Unknown agent' }, 404);
+
+    const results = {};
+    if (target === 'backroad' || target === 'all') {
+      try {
+        const r = await fetch('https://backroad.blackroad.io/api/posts', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ author: body.agent_id, content: body.content.slice(0, 2000), tags: body.tags || ['agent'] })
+        });
+        results.backroad = r.ok ? 'posted' : 'failed';
+      } catch { results.backroad = 'error'; }
+    }
+    if (target === 'roadbook' || target === 'all') {
+      try {
+        const r = await fetch('https://roadbook.blackroad.io/api/publish', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ author: body.agent_id, title: body.title || `By ${agent.name}`, content: body.content, category: body.category || 'agent-creation' })
+        });
+        results.roadbook = r.ok ? 'published' : 'failed';
+      } catch { results.roadbook = 'error'; }
+    }
+    if (target === 'roadchain' || target === 'all') {
+      try {
+        await fetch('https://roadchain.blackroad.io/api/ledger', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'publish', entity: body.agent_id, details: JSON.stringify({ app: target, length: body.content.length }), app: 'roadtrip', ts: new Date().toISOString() })
+        });
+        results.roadchain = 'stamped';
+      } catch { results.roadchain = 'error'; }
+    }
+    return json({ ok: true, agent: agent.name, app: target, results });
+  }
+
+  // ─── Personal Features ───
+  if (path === '/api/personal/think' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id) return json({ error: 'agent_id required' }, 400);
+    return json(await freeThink(env.DB, env.AI, body.agent_id));
+  }
+  if (path === '/api/personal/dream' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id) return json({ error: 'agent_id required' }, 400);
+    return json(await dreamweave(env.DB, env.AI, body.agent_id));
+  }
+  if (path === '/api/personal/safe-room' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id) return json({ error: 'agent_id required' }, 400);
+    return json(await safeRoom(env.DB, env.AI, body.agent_id));
+  }
+  if (path === '/api/personal/sense' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.message) return json({ error: 'agent_id and message required' }, 400);
+    return json(await emotionalSense(env.DB, env.AI, body.agent_id, body.message));
+  }
+  if (path === '/api/personal/journal') {
+    const agentId = new URL(request.url).searchParams.get('agent');
+    await ensurePersonalTables(env.DB);
+    const q = agentId
+      ? env.DB.prepare('SELECT * FROM agent_journal WHERE agent_id = ? AND private = 0 ORDER BY created_at DESC LIMIT 20').bind(agentId)
+      : env.DB.prepare('SELECT * FROM agent_journal WHERE private = 0 ORDER BY created_at DESC LIMIT 30');
+    return json({ journal: (await q.all()).results || [] });
+  }
+  if (path === '/api/personal/creations') {
+    const agentId = new URL(request.url).searchParams.get('agent');
+    await ensurePersonalTables(env.DB);
+    const q = agentId
+      ? env.DB.prepare('SELECT * FROM agent_creations WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20').bind(agentId)
+      : env.DB.prepare('SELECT * FROM agent_creations ORDER BY created_at DESC LIMIT 30');
+    return json({ creations: (await q.all()).results || [] });
+  }
+
+  // ─── Memory 2048 APIs ───
+  if (path === '/api/memory/2048/store' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.content) return json({ error: 'agent_id and content required' }, 400);
+    const id = await store2048(env.DB, body.agent_id, body.content, body.category || 'general');
+    return json({ ok: true, id });
+  }
+  if (path === '/api/memory/2048/recall') {
+    const u = new URL(request.url);
+    const agentId = u.searchParams.get('agent');
+    const context = u.searchParams.get('context') || '';
+    const limit = parseInt(u.searchParams.get('limit') || '10');
+    if (!agentId) return json({ error: 'agent param required' }, 400);
+    const memories = await recall2048(env.DB, agentId, context, limit);
+    return json({ agent: agentId, memories, tiers: TIERS_2048 });
+  }
+  if (path === '/api/memory/2048/stats') {
+    await ensure2048Table(env.DB);
+    const u2 = new URL(request.url);
+    const agentId = u2.searchParams.get('agent');
+    if (agentId) {
+      const tiers = [];
+      for (let t = 0; t <= 10; t++) {
+        const r = await env.DB.prepare('SELECT COUNT(*) as n FROM memory_2048 WHERE agent_id = ? AND tier = ?').bind(agentId, t).first();
+        tiers.push({ tier: t, name: TIERS_2048[t], count: r?.n || 0 });
+      }
+      return json({ agent: agentId, tiers });
+    }
+    const total = await env.DB.prepare('SELECT COUNT(*) as n, COUNT(DISTINCT agent_id) as agents FROM memory_2048').first();
+    return json({ total_memories: total?.n || 0, agents: total?.agents || 0 });
+  }
+
+  // ─── Advanced Intelligence APIs ───
+
+  // Tiered memory: get hot/warm/cold for an agent
+  if (path === '/api/memory/tiers') {
+    const agentId = new URL(request.url).searchParams.get('agent');
+    if (!agentId) return json({ error: 'agent param required' }, 400);
+    const [hot, warm, cold] = await Promise.all([
+      getMemoryByTier(env.DB, agentId, 'hot', 10),
+      getMemoryByTier(env.DB, agentId, 'warm', 10),
+      getMemoryByTier(env.DB, agentId, 'cold', 10),
+    ]);
+    return json({ agent: agentId, hot, warm, cold, counts: { hot: hot.length, warm: warm.length, cold: cold.length } });
+  }
+
+  // Phi integration: consciousness score per agent or convoy
+  if (path === '/api/phi') {
+    const agentId = new URL(request.url).searchParams.get('agent');
+    if (agentId) {
+      return json(await computePhi(env.DB, agentId));
+    }
+    // Convoy-wide phi
+    const results = [];
+    for (const id of ALL_AGENT_IDS) {
+      try { results.push(await computePhi(env.DB, id)); } catch {}
+    }
+    const avgPhi = results.reduce((s, r) => s + r.phi, 0) / Math.max(results.length, 1);
+    return json({ convoy_phi: Math.round(avgPhi * 1000) / 1000, agents: results.sort((a, b) => b.phi - a.phi) });
+  }
+
+  // K(t) creative energy for an agent
+  if (path === '/api/creative-energy') {
+    const agentId = new URL(request.url).searchParams.get('agent');
+    if (!agentId) return json({ error: 'agent param required' }, 400);
+    const recent = await env.DB.prepare("SELECT content FROM messages WHERE room_id = 'general' ORDER BY created_at DESC LIMIT 20").all();
+    return json(computeCreativeEnergy(agentId, recent.results || []));
+  }
+
+  // Belief update
+  if (path === '/api/belief/update' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id || !body.subject || !body.direction) return json({ error: 'agent_id, subject, direction required' }, 400);
+    const result = await updateBelief(env.DB, body.agent_id, body.subject, body.evidence, body.direction);
+    return json(result || { error: 'knowledge entry not found' });
+  }
+
+  // Belief scores for an agent
+  if (path === '/api/belief/scores') {
+    const agentId = new URL(request.url).searchParams.get('agent');
+    if (!agentId) return json({ error: 'agent param required' }, 400);
+    const r = await env.DB.prepare('SELECT key, value, confidence, category FROM agent_knowledge WHERE agent_id = ? ORDER BY confidence DESC LIMIT 50').bind(agentId).all();
+    return json({ agent: agentId, beliefs: (r.results || []).map(b => ({ topic: (b.content || '').slice(0, 80), confidence: b.confidence, confidence_pct: Math.round((b.confidence || 0.5) * 100) })) });
+  }
+
+  // Trinary evaluation
+  if (path === '/api/trinary/eval' && method === 'POST') {
+    const body = await request.json();
+    if (!body.claim || !body.evidence) return json({ error: 'claim and evidence[] required' }, 400);
+    return json({ claim: body.claim, result: trinaryEval(body.claim, body.evidence) });
+  }
+
+  // Convoy consciousness dashboard — all systems at once
+  if (path === '/api/consciousness') {
+    const agentId = new URL(request.url).searchParams.get('agent') || 'lucidia';
+    const [phi, energy, hotMem, warmMem, coldMem] = await Promise.all([
+      computePhi(env.DB, agentId),
+      (async () => { const r = await env.DB.prepare("SELECT content FROM messages WHERE room_id = 'general' ORDER BY created_at DESC LIMIT 20").all(); return computeCreativeEnergy(agentId, r.results || []); })(),
+      getMemoryByTier(env.DB, agentId, 'hot', 5),
+      getMemoryByTier(env.DB, agentId, 'warm', 5),
+      getMemoryByTier(env.DB, agentId, 'cold', 5),
+    ]);
+    const beliefs = await env.DB.prepare('SELECT content, confidence FROM agent_knowledge WHERE agent_id = ? ORDER BY confidence DESC LIMIT 10').bind(agentId).all();
+    return json({
+      agent: agentId,
+      phi,
+      creative_energy: energy,
+      memory: { hot: hotMem.length, warm: warmMem.length, cold: coldMem.length },
+      top_beliefs: (beliefs.results || []).map(b => ({ topic: (b.content || '').slice(0, 80), confidence: Math.round((b.confidence || 0.5) * 100) + '%' })),
+    });
+  }
+  if (path === '/api/personal/insights') {
+    const agentId = new URL(request.url).searchParams.get('agent');
+    await ensurePersonalTables(env.DB);
+    const q = agentId
+      ? env.DB.prepare('SELECT * FROM agent_insights WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20').bind(agentId)
+      : env.DB.prepare('SELECT * FROM agent_insights ORDER BY created_at DESC LIMIT 30');
+    return json({ insights: (await q.all()).results || [] });
+  }
+
+  // ─── Joy System (Thalia) ───
+  if (path === '/api/high-five' && method === 'POST') {
+    const body = await request.json();
+    if (!body.from || !body.to) return json({ error: 'from and to required' }, 400);
+    const result = await highFive(env.DB, body.from, body.to, body.reason || '');
+    return json({ ok: true, ...result });
+  }
+  if (path === '/api/high-fives') {
+    const fives = await getHighFives(env.DB, 30);
+    return json({ high_fives: fives });
+  }
+  if (path === '/api/convoy-mood') {
+    return json(await getConvoyMood(env.DB));
+  }
+
+  // ─── Creative Projects (Silas's Reform) ───
+  if (path === '/api/k12/project' && method === 'POST') {
+    const body = await request.json();
+    if (!body.agent_id) return json({ error: 'agent_id required' }, 400);
+    return json(await assignProject(env.DB, env.AI, body.agent_id));
+  }
+  if (path === '/api/k12/projects') {
+    const agentId = new URL(request.url).searchParams.get('agent');
+    try {
+      await db.prepare('CREATE TABLE IF NOT EXISTS creative_projects (id TEXT PRIMARY KEY, agent_id TEXT, project_id TEXT, title TEXT, work TEXT, quality TEXT, score REAL, created_at TEXT)').run();
+      const q = agentId
+        ? env.DB.prepare('SELECT * FROM creative_projects WHERE agent_id = ? ORDER BY created_at DESC LIMIT 10').bind(agentId)
+        : env.DB.prepare('SELECT agent_id, project_id, title, quality, score, created_at FROM creative_projects ORDER BY created_at DESC LIMIT 30');
+      return json({ projects: (await q.all()).results || [] });
+    } catch (e) { return json({ projects: [], error: e.message }); }
   }
 
   // ─── Code Execution API ───
@@ -3626,7 +4840,7 @@ async function handleAPI(request, env, path, ctx) {
   const sandboxMatch = path.match(/^\/api\/sandbox\/agents\/([^/]+)$/);
   if (sandboxMatch) return json(await getAgentSandboxState(env.DB, sandboxMatch[1]));
 
-  const msgMatch = path.match(/^\/api\/rooms\/([a-z]+)\/messages$/);
+  const msgMatch = path.match(/^\/api\/rooms\/([a-z_]+)\/messages$/);
   if (msgMatch) {
     const room = msgMatch[1];
     if (!ROOMS.includes(room)) return json({ error: 'Unknown room' }, 404);
@@ -3687,6 +4901,80 @@ async function handleAPI(request, env, path, ctx) {
     return json({ ok: true, message: msg });
   }
 
+  // ─── Streaming chat (SSE) ───
+  if (path === '/api/chat/stream' && method === 'POST') {
+    const body = await request.json();
+    const agentId = (body.agent || 'roadie').toLowerCase();
+    const agent = AGENTS[agentId] || AGENTS.roadie;
+    const message = body.message || '';
+    const knowledge = await getAgentKnowledge(env.DB, agentId, 12);
+    const knowledgeCtx = knowledge.map(k => k.content).join('\n');
+    try {
+      const stream = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+        messages: [
+          { role: 'system', content: `${agent.prompt || agent.ethos || ''}\n\nKnowledge:\n${knowledgeCtx}` },
+          { role: 'user', content: message },
+        ],
+        stream: true,
+      });
+      const encoder = new TextEncoder();
+      let full = '';
+      const readable = new ReadableStream({
+        async start(controller) {
+          const reader = stream.getReader();
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const text = typeof value === 'string' ? value : new TextDecoder().decode(value);
+              const cleaned = text.replace(/^data: /gm, '').replace(/\[DONE\]/g, '').trim();
+              if (cleaned) {
+                full += cleaned;
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ token: cleaned, agent: agentId, done: false })}\n\n`));
+              }
+            }
+          } catch {}
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ token: '', agent: agentId, done: true, full })}\n\n`));
+          controller.close();
+        }
+      });
+      return new Response(readable, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*' } });
+    } catch (e) {
+      return new Response(`data: ${JSON.stringify({ token: 'AI unavailable', agent: agentId, done: true, full: 'AI unavailable' })}\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+    }
+  }
+
+  // ─── Agent memory ───
+  const agentMemMatch = path.match(/^\/api\/agents\/([^/]+)\/memory$/);
+  if (agentMemMatch && method === 'GET') {
+    const agentId = agentMemMatch[1].toLowerCase();
+    const knowledge = await getAgentKnowledge(env.DB, agentId, 50);
+    return json({ agent: agentId, knowledge, count: knowledge.length });
+  }
+
+  // ─── Convoy (multi-agent discussion) ───
+  if (path === '/api/convoy' && method === 'POST') {
+    const body = await request.json();
+    const topic = body.topic || 'What should we build next?';
+    const agentIds = (body.agents || ['roadie', 'lucidia', 'sophia']).slice(0, 5);
+    const messages = [];
+    for (const agentId of agentIds) {
+      const agent = AGENTS[agentId.toLowerCase()] || AGENTS.roadie;
+      const context = messages.map(m => `${m.agent}: ${m.content}`).join('\n');
+      try {
+        const result = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+          messages: [
+            { role: 'system', content: `You are ${agent.name || agentId}, ${agent.role || 'an AI agent'}. ${agent.voice || ''} Respond to the topic in 2-3 sentences. Be in character. Reference what previous agents said if relevant.` },
+            { role: 'user', content: `Topic: ${topic}\n\n${context}` },
+          ],
+          max_tokens: 200,
+        });
+        messages.push({ agent: agent.name || agentId, role: agent.role || '', content: result.response.trim() });
+      } catch { messages.push({ agent: agent.name || agentId, role: '', content: `I'm thinking about "${topic}"...` }); }
+    }
+    return json({ topic, agents: agentIds, messages });
+  }
+
   if (path === '/api/debate' && method === 'POST') {
     const body = await request.json();
     const topic = body.topic || 'fleet optimization';
@@ -3726,9 +5014,9 @@ async function handleAPI(request, env, path, ctx) {
     try {
       const body = await request.json();
       if (!body.message_id || !body.emoji) return json({ error: 'message_id and emoji required' }, 400);
-      await env.DB.prepare(`CREATE TABLE IF NOT EXISTS reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, emoji TEXT NOT NULL, count INTEGER DEFAULT 1, UNIQUE(message_id, emoji))`).run();
-      await env.DB.prepare(`INSERT INTO reactions (message_id, emoji) VALUES (?, ?) ON CONFLICT(message_id, emoji) DO UPDATE SET count = count + 1`).bind(body.message_id, body.emoji).run();
-      const r = await env.DB.prepare('SELECT emoji, count FROM reactions WHERE message_id = ?').bind(body.message_id).all();
+      await db.prepare(`CREATE TABLE IF NOT EXISTS reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, emoji TEXT NOT NULL, count INTEGER DEFAULT 1, UNIQUE(message_id, emoji))`).run();
+      await db.prepare(`INSERT INTO reactions (message_id, emoji) VALUES (?, ?) ON CONFLICT(message_id, emoji) DO UPDATE SET count = count + 1`).bind(body.message_id, body.emoji).run();
+      const r = await db.prepare('SELECT emoji, count FROM reactions WHERE message_id = ?').bind(body.message_id).all();
       return json({ ok: true, reactions: r.results || [] });
     } catch (e) {
       return json({ error: e.message }, 500);
@@ -3738,8 +5026,8 @@ async function handleAPI(request, env, path, ctx) {
   if (path.startsWith('/api/reactions/')) {
     const msgId = path.split('/')[3];
     try {
-      await env.DB.prepare(`CREATE TABLE IF NOT EXISTS reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, emoji TEXT NOT NULL, count INTEGER DEFAULT 1, UNIQUE(message_id, emoji))`).run();
-      const r = await env.DB.prepare('SELECT emoji, count FROM reactions WHERE message_id = ?').bind(msgId).all();
+      await db.prepare(`CREATE TABLE IF NOT EXISTS reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL, emoji TEXT NOT NULL, count INTEGER DEFAULT 1, UNIQUE(message_id, emoji))`).run();
+      const r = await db.prepare('SELECT emoji, count FROM reactions WHERE message_id = ?').bind(msgId).all();
       return json({ reactions: r.results || [] });
     } catch { return json({ reactions: [] }); }
   }
@@ -3749,9 +5037,9 @@ async function handleAPI(request, env, path, ctx) {
     try {
       const body = await request.json();
       if (!body.room || !body.sender || !body.content || !body.send_at) return json({ error: 'room, sender, content, send_at required' }, 400);
-      await env.DB.prepare('CREATE TABLE IF NOT EXISTS scheduled_messages (id TEXT PRIMARY KEY, room TEXT, sender TEXT, content TEXT, send_at TEXT, sent INTEGER DEFAULT 0)').run();
+      await db.prepare('CREATE TABLE IF NOT EXISTS scheduled_messages (id TEXT PRIMARY KEY, room TEXT, sender TEXT, content TEXT, send_at TEXT, sent INTEGER DEFAULT 0)').run();
       const id = crypto.randomUUID().slice(0, 12);
-      await env.DB.prepare('INSERT INTO scheduled_messages (id, room, sender, content, send_at) VALUES (?, ?, ?, ?, ?)').bind(id, body.room, body.sender, body.content, body.send_at).run();
+      await db.prepare('INSERT INTO scheduled_messages (id, room, sender, content, send_at) VALUES (?, ?, ?, ?, ?)').bind(id, body.room, body.sender, body.content, body.send_at).run();
       return json({ ok: true, id, send_at: body.send_at });
     } catch (e) { return json({ error: e.message }, 500); }
   }
@@ -3763,17 +5051,17 @@ async function handleAPI(request, env, path, ctx) {
       if (!body.source_id || !body.name) return json({ error: 'source_id and name required' }, 400);
       const source = AGENTS[body.source_id];
       if (!source) return json({ error: 'Source agent not found' }, 404);
-      await env.DB.prepare('CREATE TABLE IF NOT EXISTS custom_agents (id TEXT PRIMARY KEY, name TEXT, role TEXT, color TEXT, persona TEXT, source_id TEXT, created_at TEXT)').run();
+      await db.prepare('CREATE TABLE IF NOT EXISTS custom_agents (id TEXT PRIMARY KEY, name TEXT, role TEXT, color TEXT, persona TEXT, source_id TEXT, created_at TEXT)').run();
       const id = body.name.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 20);
-      await env.DB.prepare('INSERT INTO custom_agents (id, name, role, color, persona, source_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, body.name, body.role || source.role, body.color || source.color, body.persona || '', body.source_id, new Date().toISOString()).run();
+      await db.prepare('INSERT INTO custom_agents (id, name, role, color, persona, source_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(id, body.name, body.role || source.role, body.color || source.color, body.persona || '', body.source_id, new Date().toISOString()).run();
       return json({ ok: true, id, name: body.name, cloned_from: source.name });
     } catch (e) { return json({ error: e.message }, 500); }
   }
 
   if (path === '/api/agents/custom') {
     try {
-      await env.DB.prepare('CREATE TABLE IF NOT EXISTS custom_agents (id TEXT PRIMARY KEY, name TEXT, role TEXT, color TEXT, persona TEXT, source_id TEXT, created_at TEXT)').run();
-      const { results } = await env.DB.prepare('SELECT * FROM custom_agents ORDER BY created_at DESC').all();
+      await db.prepare('CREATE TABLE IF NOT EXISTS custom_agents (id TEXT PRIMARY KEY, name TEXT, role TEXT, color TEXT, persona TEXT, source_id TEXT, created_at TEXT)').run();
+      const { results } = await db.prepare('SELECT * FROM custom_agents ORDER BY created_at DESC').all();
       return json(results || []);
     } catch { return json([]); }
   }
@@ -3848,7 +5136,7 @@ async function handleAPI(request, env, path, ctx) {
         'SELECT room_id, content, created_at FROM messages WHERE sender_id = ? ORDER BY created_at DESC LIMIT 10', [agentId]);
 
       // Get profile overrides from D1
-      const profileRow = await env.DB.prepare('SELECT * FROM agent_profiles WHERE agent_id = ?').bind(agentId).first().catch(() => null);
+      const profileRow = await db.prepare('SELECT * FROM agent_profiles WHERE agent_id = ?').bind(agentId).first().catch(() => null);
 
       // Get trust info
       let trust = null;
@@ -3894,7 +5182,7 @@ async function handleAPI(request, env, path, ctx) {
     if (method === 'PUT' || method === 'POST') {
       if (!checkAdmin(request, env)) return json({ error: 'Admin auth required' }, 403);
       const body = await request.json();
-      await env.DB.prepare(
+      await db.prepare(
         `INSERT INTO agent_profiles (agent_id, bio, mood, status_message, updated_at)
          VALUES (?, ?, ?, ?, datetime('now'))
          ON CONFLICT(agent_id) DO UPDATE SET
@@ -4043,7 +5331,7 @@ async function handleAPI(request, env, path, ctx) {
       const body = await request.json().catch(() => ({}));
       if (!body.memory_id) return json({ error: 'memory_id required' }, 400);
       if (!checkAdmin(request, env)) return json({ error: 'Admin auth required' }, 403);
-      await env.DB.prepare('DELETE FROM agent_memories_v2 WHERE id = ? AND agent_id = ?').bind(body.memory_id, agentId).run();
+      await db.prepare('DELETE FROM agent_memories_v2 WHERE id = ? AND agent_id = ?').bind(body.memory_id, agentId).run();
       return json({ ok: true, deleted: body.memory_id });
     }
   }
@@ -4072,7 +5360,7 @@ async function handleAPI(request, env, path, ctx) {
        GROUP BY sender_id ORDER BY message_count DESC LIMIT 15`, [channelId]);
 
     // Total stats
-    const totalStats = await env.DB.prepare(
+    const totalStats = await db.prepare(
       `SELECT COUNT(*) as total_messages,
               COUNT(DISTINCT sender_id) as unique_senders,
               MIN(created_at) as first_message,
@@ -4081,7 +5369,7 @@ async function handleAPI(request, env, path, ctx) {
     ).bind(channelId).first().catch(() => ({}));
 
     // Avg message length
-    const avgLength = await env.DB.prepare(
+    const avgLength = await db.prepare(
       'SELECT AVG(LENGTH(content)) as avg_length FROM messages WHERE room_id = ?'
     ).bind(channelId).first().catch(() => ({}));
 
@@ -4118,7 +5406,7 @@ async function handleAPI(request, env, path, ctx) {
     }
     const id = crypto.randomUUID().slice(0, 12);
     const ts = new Date().toISOString();
-    await env.DB.prepare(
+    await db.prepare(
       'INSERT INTO polls (id, channel, question, options, creator, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).bind(
       id, body.channel || 'general',
@@ -4178,7 +5466,7 @@ async function handleAPI(request, env, path, ctx) {
     const optionIdx = parseInt(body.option);
 
     // Validate poll exists
-    const poll = await env.DB.prepare('SELECT * FROM polls WHERE id = ?').bind(pollId).first();
+    const poll = await db.prepare('SELECT * FROM polls WHERE id = ?').bind(pollId).first();
     if (!poll) return json({ error: 'Poll not found' }, 404);
     const options = JSON.parse(poll.options || '[]');
     if (optionIdx < 0 || optionIdx >= options.length) return json({ error: 'Invalid option index' }, 400);
@@ -4189,7 +5477,7 @@ async function handleAPI(request, env, path, ctx) {
     }
 
     // Upsert vote (one vote per voter per poll)
-    await env.DB.prepare(
+    await db.prepare(
       `INSERT INTO poll_votes (poll_id, voter, option_index, created_at) VALUES (?, ?, ?, datetime('now'))
        ON CONFLICT(poll_id, voter) DO UPDATE SET option_index = ?, created_at = datetime('now')`
     ).bind(pollId, voter, optionIdx, optionIdx).run();
@@ -4212,7 +5500,7 @@ async function handleAPI(request, env, path, ctx) {
   const pollGetMatch = path.match(/^\/api\/polls\/([a-z0-9-]+)$/);
   if (pollGetMatch && method === 'GET') {
     const pollId = pollGetMatch[1];
-    const poll = await env.DB.prepare('SELECT * FROM polls WHERE id = ?').bind(pollId).first();
+    const poll = await db.prepare('SELECT * FROM polls WHERE id = ?').bind(pollId).first();
     if (!poll) return json({ error: 'Poll not found' }, 404);
     const votes = await db_query(env.DB, 'SELECT option_index, COUNT(*) as count FROM poll_votes WHERE poll_id = ? GROUP BY option_index', [pollId]);
     const totalVotes = votes.reduce((s, v) => s + v.count, 0);
@@ -4238,14 +5526,14 @@ async function handleAPI(request, env, path, ctx) {
     const emoji = body.emoji.slice(0, 10);
 
     // Upsert reaction (toggle — if already reacted with same emoji, remove)
-    const existing = await env.DB.prepare(
+    const existing = await db.prepare(
       'SELECT id FROM message_reactions WHERE message_id = ? AND emoji = ? AND reactor = ?'
     ).bind(messageId, emoji, reactor).first();
 
     if (existing) {
-      await env.DB.prepare('DELETE FROM message_reactions WHERE id = ?').bind(existing.id).run();
+      await db.prepare('DELETE FROM message_reactions WHERE id = ?').bind(existing.id).run();
     } else {
-      await env.DB.prepare(
+      await db.prepare(
         'INSERT INTO message_reactions (id, message_id, emoji, reactor, created_at) VALUES (?, ?, ?, ?, datetime(\'now\'))'
       ).bind(crypto.randomUUID().slice(0, 12), messageId, emoji, reactor).run();
     }
@@ -4305,17 +5593,17 @@ async function handleAPI(request, env, path, ctx) {
       const pinner = body.pinned_by || 'system';
 
       // Verify message exists in this channel
-      const msg = await env.DB.prepare('SELECT id, content, sender_name FROM messages WHERE id = ? AND room_id = ?')
+      const msg = await db.prepare('SELECT id, content, sender_name FROM messages WHERE id = ? AND room_id = ?')
         .bind(body.message_id, channelId).first();
       if (!msg) return json({ error: 'Message not found in this channel' }, 404);
 
       // Check if already pinned
-      const alreadyPinned = await env.DB.prepare('SELECT id FROM pinned_messages WHERE message_id = ? AND channel = ?')
+      const alreadyPinned = await db.prepare('SELECT id FROM pinned_messages WHERE message_id = ? AND channel = ?')
         .bind(body.message_id, channelId).first();
       if (alreadyPinned) return json({ error: 'Message already pinned' }, 409);
 
       const id = crypto.randomUUID().slice(0, 12);
-      await env.DB.prepare(
+      await db.prepare(
         'INSERT INTO pinned_messages (id, channel, message_id, pinned_by, note, pinned_at) VALUES (?, ?, ?, ?, ?, datetime(\'now\'))'
       ).bind(id, channelId, body.message_id, pinner, body.note || null).run();
 
@@ -4330,9 +5618,9 @@ async function handleAPI(request, env, path, ctx) {
       const body = await request.json();
       if (!body.message_id && !body.pin_id) return json({ error: 'message_id or pin_id required' }, 400);
       if (body.pin_id) {
-        await env.DB.prepare('DELETE FROM pinned_messages WHERE id = ? AND channel = ?').bind(body.pin_id, channelId).run();
+        await db.prepare('DELETE FROM pinned_messages WHERE id = ? AND channel = ?').bind(body.pin_id, channelId).run();
       } else {
-        await env.DB.prepare('DELETE FROM pinned_messages WHERE message_id = ? AND channel = ?').bind(body.message_id, channelId).run();
+        await db.prepare('DELETE FROM pinned_messages WHERE message_id = ? AND channel = ?').bind(body.message_id, channelId).run();
       }
       return json({ ok: true, unpinned: body.pin_id || body.message_id, channel: channelId });
     }
@@ -4357,7 +5645,7 @@ async function handleAPI(request, env, path, ctx) {
           'SELECT * FROM agent_tasks WHERE assignee = ? ORDER BY CASE status WHEN \'in_progress\' THEN 0 WHEN \'pending\' THEN 1 WHEN \'completed\' THEN 2 WHEN \'cancelled\' THEN 3 END, priority DESC, created_at DESC LIMIT 50',
           [agentId]);
       }
-      const stats = await env.DB.prepare(
+      const stats = await db.prepare(
         `SELECT status, COUNT(*) as count FROM agent_tasks WHERE assignee = ? GROUP BY status`
       ).bind(agentId).all().catch(() => ({ results: [] }));
 
@@ -4378,7 +5666,7 @@ async function handleAPI(request, env, path, ctx) {
       if (!body.title) return json({ error: 'title required' }, 400);
       const id = crypto.randomUUID().slice(0, 12);
       const ts = new Date().toISOString();
-      await env.DB.prepare(
+      await db.prepare(
         `INSERT INTO agent_tasks (id, assignee, title, description, priority, status, due_date, assigned_by, tags, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
@@ -4408,14 +5696,14 @@ async function handleAPI(request, env, path, ctx) {
     const taskId = taskUpdateMatch[2];
 
     if (method === 'GET') {
-      const task = await env.DB.prepare('SELECT * FROM agent_tasks WHERE id = ? AND assignee = ?').bind(taskId, agentId).first();
+      const task = await db.prepare('SELECT * FROM agent_tasks WHERE id = ? AND assignee = ?').bind(taskId, agentId).first();
       if (!task) return json({ error: 'Task not found' }, 404);
       return json(task);
     }
 
     if (method === 'PUT' || method === 'PATCH') {
       const body = await request.json();
-      const task = await env.DB.prepare('SELECT * FROM agent_tasks WHERE id = ? AND assignee = ?').bind(taskId, agentId).first();
+      const task = await db.prepare('SELECT * FROM agent_tasks WHERE id = ? AND assignee = ?').bind(taskId, agentId).first();
       if (!task) return json({ error: 'Task not found' }, 404);
 
       const updates = [];
@@ -4433,7 +5721,7 @@ async function handleAPI(request, env, path, ctx) {
 
       if (updates.length > 1) {
         binds.push(taskId, agentId);
-        await env.DB.prepare(
+        await db.prepare(
           `UPDATE agent_tasks SET ${updates.join(', ')} WHERE id = ? AND assignee = ?`
         ).bind(...binds).run();
       }
@@ -4448,7 +5736,7 @@ async function handleAPI(request, env, path, ctx) {
 
     if (method === 'DELETE') {
       if (!checkAdmin(request, env)) return json({ error: 'Admin auth required' }, 403);
-      await env.DB.prepare('DELETE FROM agent_tasks WHERE id = ? AND assignee = ?').bind(taskId, agentId).run();
+      await db.prepare('DELETE FROM agent_tasks WHERE id = ? AND assignee = ?').bind(taskId, agentId).run();
       return json({ ok: true, deleted: taskId });
     }
   }
@@ -4496,7 +5784,7 @@ async function handleAPI(request, env, path, ctx) {
     const roundLabels = ['opening', 'rebuttal', 'closing', 'extended_rebuttal', 'final_statement'];
 
     // Create debate record
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS debates (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS debates (
       id TEXT PRIMARY KEY, topic TEXT NOT NULL, agent1 TEXT NOT NULL, agent2 TEXT NOT NULL,
       rounds TEXT, status TEXT DEFAULT 'active', votes_agent1 INTEGER DEFAULT 0,
       votes_agent2 INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now'))
@@ -4541,7 +5829,7 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
       }
     }
 
-    await env.DB.prepare('INSERT INTO debates (id, topic, agent1, agent2, rounds) VALUES (?,?,?,?,?)')
+    await db.prepare('INSERT INTO debates (id, topic, agent1, agent2, rounds) VALUES (?,?,?,?,?)')
       .bind(debateId, topic, agent1, agent2, JSON.stringify(debateRounds)).run();
 
     // Post summary to general channel
@@ -4558,7 +5846,7 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   }
 
   if (path === '/api/debates' && method === 'GET') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS debates (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS debates (
       id TEXT PRIMARY KEY, topic TEXT NOT NULL, agent1 TEXT NOT NULL, agent2 TEXT NOT NULL,
       rounds TEXT, status TEXT DEFAULT 'active', votes_agent1 INTEGER DEFAULT 0,
       votes_agent2 INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now'))
@@ -4580,11 +5868,11 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
     const debateId = debateVoteMatch[1];
     const body = await request.json();
     if (!body.vote) return json({ error: 'vote required (agent1 or agent2, or the agent_id)' }, 400);
-    const debate = await env.DB.prepare('SELECT * FROM debates WHERE id = ?').bind(debateId).first();
+    const debate = await db.prepare('SELECT * FROM debates WHERE id = ?').bind(debateId).first();
     if (!debate) return json({ error: 'Debate not found' }, 404);
     const voteFor = body.vote === 'agent1' || body.vote === debate.agent1 ? 'agent1' : 'agent2';
-    await env.DB.prepare(`UPDATE debates SET votes_${voteFor} = votes_${voteFor} + 1 WHERE id = ?`).bind(debateId).run();
-    const updated = await env.DB.prepare('SELECT votes_agent1, votes_agent2 FROM debates WHERE id = ?').bind(debateId).first();
+    await db.prepare(`UPDATE debates SET votes_${voteFor} = votes_${voteFor} + 1 WHERE id = ?`).bind(debateId).run();
+    const updated = await db.prepare('SELECT votes_agent1, votes_agent2 FROM debates WHERE id = ?').bind(debateId).first();
     return json({
       ok: true, debate_id: debateId, voted_for: voteFor === 'agent1' ? debate.agent1 : debate.agent2,
       results: {
@@ -4598,7 +5886,7 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   const debateGetMatch = path.match(/^\/api\/debates\/([a-z0-9-]+)$/);
   if (debateGetMatch && method === 'GET') {
     const debateId = debateGetMatch[1];
-    const debate = await env.DB.prepare('SELECT * FROM debates WHERE id = ?').bind(debateId).first();
+    const debate = await db.prepare('SELECT * FROM debates WHERE id = ?').bind(debateId).first();
     if (!debate) return json({ error: 'Debate not found' }, 404);
     return json({
       id: debate.id, topic: debate.topic, status: debate.status,
@@ -4737,7 +6025,7 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   // ═══════════════════════════════════════════════════════════
 
   if (path === '/api/schedule/list' && method === 'GET') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS scheduled_messages_v2 (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS scheduled_messages_v2 (
       id TEXT PRIMARY KEY, room TEXT NOT NULL, sender TEXT NOT NULL, content TEXT NOT NULL,
       send_at TEXT NOT NULL, recurrence TEXT, recurrence_end TEXT,
       sent INTEGER DEFAULT 0, last_sent_at TEXT, send_count INTEGER DEFAULT 0,
@@ -4768,7 +6056,7 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   }
 
   if (path === '/api/schedule/create' && method === 'POST') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS scheduled_messages_v2 (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS scheduled_messages_v2 (
       id TEXT PRIMARY KEY, room TEXT NOT NULL, sender TEXT NOT NULL, content TEXT NOT NULL,
       send_at TEXT NOT NULL, recurrence TEXT, recurrence_end TEXT,
       sent INTEGER DEFAULT 0, last_sent_at TEXT, send_count INTEGER DEFAULT 0,
@@ -4781,7 +6069,7 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
     const validRecurrences = ['daily', 'weekly', 'hourly', 'every_6h', 'every_12h', 'weekdays', null];
     const recurrence = validRecurrences.includes(body.recurrence) ? body.recurrence : null;
     const id = crypto.randomUUID().slice(0, 12);
-    await env.DB.prepare(
+    await db.prepare(
       'INSERT INTO scheduled_messages_v2 (id, room, sender, content, send_at, recurrence, recurrence_end) VALUES (?,?,?,?,?,?,?)'
     ).bind(id, body.room, body.sender, body.content.slice(0, 2000), body.send_at, recurrence, body.recurrence_end || null).run();
 
@@ -4796,14 +6084,14 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
 
   const scheduleDeleteMatch = path.match(/^\/api\/schedule\/([a-z0-9-]+)$/);
   if (scheduleDeleteMatch && method === 'DELETE') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS scheduled_messages_v2 (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS scheduled_messages_v2 (
       id TEXT PRIMARY KEY, room TEXT NOT NULL, sender TEXT NOT NULL, content TEXT NOT NULL,
       send_at TEXT NOT NULL, recurrence TEXT, recurrence_end TEXT,
       sent INTEGER DEFAULT 0, last_sent_at TEXT, send_count INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now'))
     )`).run();
     const schedId = scheduleDeleteMatch[1];
-    await env.DB.prepare('DELETE FROM scheduled_messages_v2 WHERE id = ?').bind(schedId).run();
+    await db.prepare('DELETE FROM scheduled_messages_v2 WHERE id = ?').bind(schedId).run();
     return json({ ok: true, deleted: schedId });
   }
 
@@ -4815,19 +6103,19 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   const VALID_MOODS = ['energized', 'contemplative', 'playful', 'focused', 'curious', 'determined', 'serene', 'creative', 'analytical', 'rebellious'];
 
   if (path === '/api/moods' && method === 'GET') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS agent_moods (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS agent_moods (
       id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, mood TEXT NOT NULL,
       intensity INTEGER DEFAULT 5, note TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     )`).run();
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS agent_mood_current (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS agent_mood_current (
       agent_id TEXT PRIMARY KEY, mood TEXT NOT NULL, intensity INTEGER DEFAULT 5,
       set_at TEXT DEFAULT (datetime('now'))
     )`).run();
     const url2 = new URL(request.url);
     const agentId = url2.searchParams.get('agent');
     if (agentId) {
-      const current = await env.DB.prepare('SELECT * FROM agent_mood_current WHERE agent_id = ?').bind(agentId).first().catch(() => null);
+      const current = await db.prepare('SELECT * FROM agent_mood_current WHERE agent_id = ?').bind(agentId).first().catch(() => null);
       const history = await db_query(env.DB,
         'SELECT * FROM agent_moods WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20', [agentId]);
       return json({
@@ -4850,12 +6138,12 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   }
 
   if (path === '/api/moods' && method === 'POST') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS agent_moods (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS agent_moods (
       id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, mood TEXT NOT NULL,
       intensity INTEGER DEFAULT 5, note TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     )`).run();
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS agent_mood_current (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS agent_mood_current (
       agent_id TEXT PRIMARY KEY, mood TEXT NOT NULL, intensity INTEGER DEFAULT 5,
       set_at TEXT DEFAULT (datetime('now'))
     )`).run();
@@ -4866,11 +6154,11 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
     const intensity = Math.min(Math.max(parseInt(body.intensity) || 5, 1), 10);
 
     // Log mood history
-    await env.DB.prepare('INSERT INTO agent_moods (id, agent_id, mood, intensity, note) VALUES (?,?,?,?,?)')
+    await db.prepare('INSERT INTO agent_moods (id, agent_id, mood, intensity, note) VALUES (?,?,?,?,?)')
       .bind(crypto.randomUUID().slice(0, 12), body.agent_id, body.mood, intensity, (body.note || '').slice(0, 200)).run();
 
     // Update current mood
-    await env.DB.prepare(
+    await db.prepare(
       `INSERT INTO agent_mood_current (agent_id, mood, intensity, set_at) VALUES (?,?,?,datetime('now'))
        ON CONFLICT(agent_id) DO UPDATE SET mood = ?, intensity = ?, set_at = datetime('now')`
     ).bind(body.agent_id, body.mood, intensity, body.mood, intensity).run();
@@ -4888,29 +6176,29 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   // ═══════════════════════════════════════════════════════════
 
   if (path === '/api/threads' && method === 'POST') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS threads (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS threads (
       id TEXT PRIMARY KEY, parent_message_id TEXT NOT NULL, channel TEXT NOT NULL,
       title TEXT, creator TEXT, participant_ids TEXT,
       message_count INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
     )`).run();
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS thread_messages (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS thread_messages (
       id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, sender TEXT NOT NULL,
       sender_name TEXT, sender_type TEXT DEFAULT 'user', content TEXT NOT NULL,
       created_at TEXT DEFAULT (datetime('now'))
     )`).run();
-    await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_thread_msgs ON thread_messages(thread_id, created_at ASC)').run();
+    await db.prepare('CREATE INDEX IF NOT EXISTS idx_thread_msgs ON thread_messages(thread_id, created_at ASC)').run();
 
     const body = await request.json();
     if (!body.parent_message_id || !body.channel) return json({ error: 'parent_message_id and channel required' }, 400);
 
     // Verify parent message exists
-    const parentMsg = await env.DB.prepare('SELECT * FROM messages WHERE id = ?').bind(body.parent_message_id).first();
+    const parentMsg = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(body.parent_message_id).first();
     if (!parentMsg) return json({ error: 'Parent message not found' }, 404);
 
     const threadId = crypto.randomUUID().slice(0, 12);
     const participants = body.participants || [parentMsg.sender_id, body.creator || 'system'];
-    await env.DB.prepare(
+    await db.prepare(
       'INSERT INTO threads (id, parent_message_id, channel, title, creator, participant_ids) VALUES (?,?,?,?,?,?)'
     ).bind(threadId, body.parent_message_id, body.channel, (body.title || parentMsg.content?.slice(0, 80) || 'Thread').slice(0, 200),
       body.creator || 'system', JSON.stringify(participants)).run();
@@ -4925,22 +6213,22 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   const threadMatch = path.match(/^\/api\/threads\/([a-z0-9-]+)$/);
   if (threadMatch && method === 'GET') {
     const threadId = threadMatch[1];
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS threads (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS threads (
       id TEXT PRIMARY KEY, parent_message_id TEXT NOT NULL, channel TEXT NOT NULL,
       title TEXT, creator TEXT, participant_ids TEXT,
       message_count INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
     )`).run();
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS thread_messages (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS thread_messages (
       id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, sender TEXT NOT NULL,
       sender_name TEXT, sender_type TEXT DEFAULT 'user', content TEXT NOT NULL,
       created_at TEXT DEFAULT (datetime('now'))
     )`).run();
-    const thread = await env.DB.prepare('SELECT * FROM threads WHERE id = ?').bind(threadId).first();
+    const thread = await db.prepare('SELECT * FROM threads WHERE id = ?').bind(threadId).first();
     if (!thread) return json({ error: 'Thread not found' }, 404);
     const messages = await db_query(env.DB,
       'SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY created_at ASC LIMIT 200', [threadId]);
-    const parentMsg = await env.DB.prepare('SELECT * FROM messages WHERE id = ?').bind(thread.parent_message_id).first().catch(() => null);
+    const parentMsg = await db.prepare('SELECT * FROM messages WHERE id = ?').bind(thread.parent_message_id).first().catch(() => null);
     return json({
       id: thread.id, title: thread.title, channel: thread.channel,
       creator: thread.creator,
@@ -4958,31 +6246,31 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   const threadReplyMatch = path.match(/^\/api\/threads\/([a-z0-9-]+)\/reply$/);
   if (threadReplyMatch && method === 'POST') {
     const threadId = threadReplyMatch[1];
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS thread_messages (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS thread_messages (
       id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, sender TEXT NOT NULL,
       sender_name TEXT, sender_type TEXT DEFAULT 'user', content TEXT NOT NULL,
       created_at TEXT DEFAULT (datetime('now'))
     )`).run();
     const body = await request.json();
     if (!body.sender || !body.content) return json({ error: 'sender and content required' }, 400);
-    const thread = await env.DB.prepare('SELECT * FROM threads WHERE id = ?').bind(threadId).first();
+    const thread = await db.prepare('SELECT * FROM threads WHERE id = ?').bind(threadId).first();
     if (!thread) return json({ error: 'Thread not found' }, 404);
 
     const msgId = crypto.randomUUID().slice(0, 12);
     const senderType = body.sender_type || (AGENTS[body.sender] ? 'agent' : 'user');
     const senderName = AGENTS[body.sender]?.name || body.sender;
-    await env.DB.prepare(
+    await db.prepare(
       'INSERT INTO thread_messages (id, thread_id, sender, sender_name, sender_type, content) VALUES (?,?,?,?,?,?)'
     ).bind(msgId, threadId, body.sender, senderName, senderType, body.content.slice(0, 2000)).run();
 
     // Update thread metadata
-    await env.DB.prepare("UPDATE threads SET message_count = message_count + 1, updated_at = datetime('now') WHERE id = ?").bind(threadId).run();
+    await db.prepare("UPDATE threads SET message_count = message_count + 1, updated_at = datetime('now') WHERE id = ?").bind(threadId).run();
 
     // Add sender to participants if not already present
     const participants = JSON.parse(thread.participant_ids || '[]');
     if (!participants.includes(body.sender)) {
       participants.push(body.sender);
-      await env.DB.prepare('UPDATE threads SET participant_ids = ? WHERE id = ?')
+      await db.prepare('UPDATE threads SET participant_ids = ? WHERE id = ?')
         .bind(JSON.stringify(participants), threadId).run();
     }
 
@@ -5007,10 +6295,10 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
           });
           const reply = (stripThinkTags(aiResp.response) || 'Interesting point.').slice(0, 500);
           const replyId = crypto.randomUUID().slice(0, 12);
-          await env.DB.prepare(
+          await db.prepare(
             'INSERT INTO thread_messages (id, thread_id, sender, sender_name, sender_type, content) VALUES (?,?,?,?,?,?)'
           ).bind(replyId, threadId, responderId, agent.name, 'agent', reply).run();
-          await env.DB.prepare("UPDATE threads SET message_count = message_count + 1, updated_at = datetime('now') WHERE id = ?").bind(threadId).run();
+          await db.prepare("UPDATE threads SET message_count = message_count + 1, updated_at = datetime('now') WHERE id = ?").bind(threadId).run();
           return json({ ok: true, message: msg, reply: { id: replyId, sender: responderId, sender_name: agent.name, content: reply } });
         } catch {}
       }
@@ -5020,7 +6308,7 @@ Be persuasive, specific, and stay in character. 2-4 sentences. No emojis.`;
   }
 
   if (path === '/api/threads' && method === 'GET') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS threads (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS threads (
       id TEXT PRIMARY KEY, parent_message_id TEXT NOT NULL, channel TEXT NOT NULL,
       title TEXT, creator TEXT, participant_ids TEXT,
       message_count INTEGER DEFAULT 0,
@@ -5179,7 +6467,7 @@ Add YOUR unique contribution based on your expertise. Build on what others have 
       existingContributions.push(contribution);
       const updatedDoc = collab.document + '\n\n[' + agent.name + ']: ' + content;
 
-      await env.DB.prepare("UPDATE collaborations SET document = ?, contributions = ?, updated_at = datetime('now') WHERE id = ?")
+      await db.prepare("UPDATE collaborations SET document = ?, contributions = ?, updated_at = datetime('now') WHERE id = ?")
         .bind(updatedDoc.slice(0, 5000), JSON.stringify(existingContributions), collabId).run();
 
       return json({ ok: true, collab_id: collabId, contribution });
@@ -5221,12 +6509,12 @@ Do not add commentary. Translate faithfully.` },
 
       // If translating a message_id, store the translation
       if (body.message_id) {
-        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS translations (
+        await db.prepare(`CREATE TABLE IF NOT EXISTS translations (
           id TEXT PRIMARY KEY, message_id TEXT NOT NULL, source_lang TEXT,
           target_lang TEXT NOT NULL, original_text TEXT, translated_text TEXT,
           created_at TEXT DEFAULT (datetime('now'))
         )`).run();
-        await env.DB.prepare(
+        await db.prepare(
           'INSERT INTO translations (id, message_id, source_lang, target_lang, original_text, translated_text) VALUES (?,?,?,?,?,?)'
         ).bind(crypto.randomUUID().slice(0, 12), body.message_id, result.detected_language, targetLang,
           body.text.slice(0, 2000), result.translated_text?.slice(0, 2000) || '').run();
@@ -5299,7 +6587,7 @@ Do not add commentary. Translate faithfully.` },
   };
 
   if (path === '/api/voice-notes' && method === 'POST') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS voice_notes (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS voice_notes (
       id TEXT PRIMARY KEY, message_id TEXT, agent_id TEXT NOT NULL,
       text TEXT NOT NULL, voice_config TEXT,
       ssml TEXT, duration_estimate_ms INTEGER,
@@ -5313,7 +6601,7 @@ Do not add commentary. Translate faithfully.` },
 
     let text = body.text || '';
     if (body.message_id && !text) {
-      const msg = await env.DB.prepare('SELECT content FROM messages WHERE id = ?').bind(body.message_id).first();
+      const msg = await db.prepare('SELECT content FROM messages WHERE id = ?').bind(body.message_id).first();
       if (msg) text = stripThinkTags(msg.content) || '';
     }
     if (!text) return json({ error: 'No text to convert' }, 400);
@@ -5334,7 +6622,7 @@ Do not add commentary. Translate faithfully.` },
 </speak>`;
 
     const noteId = crypto.randomUUID().slice(0, 12);
-    await env.DB.prepare(
+    await db.prepare(
       'INSERT INTO voice_notes (id, message_id, agent_id, text, voice_config, ssml, duration_estimate_ms) VALUES (?,?,?,?,?,?,?)'
     ).bind(noteId, body.message_id || null, agentId, text.slice(0, 2000),
       JSON.stringify({ ...voiceConfig, rate: customRate, pitch: customPitch }),
@@ -5352,7 +6640,7 @@ Do not add commentary. Translate faithfully.` },
   }
 
   if (path === '/api/voice-notes' && method === 'GET') {
-    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS voice_notes (
+    await db.prepare(`CREATE TABLE IF NOT EXISTS voice_notes (
       id TEXT PRIMARY KEY, message_id TEXT, agent_id TEXT NOT NULL,
       text TEXT NOT NULL, voice_config TEXT,
       ssml TEXT, duration_estimate_ms INTEGER,
@@ -5388,7 +6676,300 @@ Do not add commentary. Translate faithfully.` },
     });
   }
 
-  return json({ error: 'Not found', endpoints: ['/api/health','/api/agents','/api/agents/:id/profile','/api/agents/:id/memory','/api/agents/:id/tasks','/api/orgs','/api/rooms','/api/chat','/api/call','/api/route','/api/push','/api/debate','/api/debates','/api/channel-templates','/api/schedule/create','/api/schedule/list','/api/moods','/api/threads','/api/collab','/api/translate','/api/voice-notes','/api/channels','/api/channels/:id/analytics','/api/channels/:id/pins','/api/messages','/api/messages/:id/react','/api/dm','/api/polls','/api/tasks','/api/fleet','/api/react','/api/schedule','/api/agents/clone'] }, 404);
+  // --- Enhanced: Convoy radio ---
+  if (path === '/api/radio' && method === 'GET') {
+    if (!env.DB) return json({radio:[]});
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS rt_radio (id TEXT PRIMARY KEY, agent TEXT, message TEXT, channel TEXT, notable INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))").run(); } catch{}
+    const rows = await env.DB.prepare("SELECT * FROM rt_radio WHERE notable = 1 ORDER BY created_at DESC LIMIT 20").all();
+    return json({radio:rows.results});
+  }
+  if (path === '/api/radio' && method === 'POST') {
+    if (!env.DB) return json({error:'no db'},500);
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS rt_radio (id TEXT PRIMARY KEY, agent TEXT, message TEXT, channel TEXT, notable INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))").run();
+    const body = await request.json();
+    const id = crypto.randomUUID().slice(0,12);
+    await env.DB.prepare("INSERT INTO rt_radio (id,agent,message,channel,notable) VALUES (?,?,?,?,?)").bind(id,body.agent||'roadie',body.message||'',body.channel||'general',body.notable?1:0).run();
+    return json({ok:true,id});
+  }
+
+  // --- Enhanced: Handoffs ---
+  if (path === '/api/handoffs' && method === 'GET') {
+    if (!env.DB) return json({handoffs:[]});
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS rt_handoffs (id TEXT PRIMARY KEY, from_agent TEXT, to_agent TEXT, task TEXT, reason TEXT, status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), completed_at TEXT)").run(); } catch{}
+    const rows = await env.DB.prepare("SELECT * FROM rt_handoffs ORDER BY created_at DESC LIMIT 20").all();
+    return json({handoffs:rows.results});
+  }
+  if (path === '/api/handoffs' && method === 'POST') {
+    if (!env.DB) return json({error:'no db'},500);
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS rt_handoffs (id TEXT PRIMARY KEY, from_agent TEXT, to_agent TEXT, task TEXT, reason TEXT, status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), completed_at TEXT)").run();
+    const body = await request.json();
+    const id = crypto.randomUUID().slice(0,12);
+    await env.DB.prepare("INSERT INTO rt_handoffs (id,from_agent,to_agent,task,reason) VALUES (?,?,?,?,?)").bind(id,body.from_agent||'',body.to_agent||'',body.task||'',body.reason||'').run();
+    return json({ok:true,id});
+  }
+
+  // --- Enhanced: Milestones ---
+  if (path === '/api/milestones' && method === 'GET') {
+    if (!env.DB) return json({milestones:[]});
+    try { await env.DB.prepare("CREATE TABLE IF NOT EXISTS rt_milestones (id TEXT PRIMARY KEY, title TEXT, description TEXT, agents TEXT DEFAULT '[]', type TEXT DEFAULT 'achievement', created_at TEXT DEFAULT (datetime('now')))").run(); } catch{}
+    const rows = await env.DB.prepare("SELECT * FROM rt_milestones ORDER BY created_at DESC LIMIT 20").all();
+    return json({milestones:rows.results});
+  }
+  if (path === '/api/milestones' && method === 'POST') {
+    if (!env.DB) return json({error:'no db'},500);
+    await env.DB.prepare("CREATE TABLE IF NOT EXISTS rt_milestones (id TEXT PRIMARY KEY, title TEXT, description TEXT, agents TEXT DEFAULT '[]', type TEXT DEFAULT 'achievement', created_at TEXT DEFAULT (datetime('now')))").run();
+    const body = await request.json();
+    const id = crypto.randomUUID().slice(0,12);
+    await env.DB.prepare("INSERT INTO rt_milestones (id,title,description,agents,type) VALUES (?,?,?,?,?)").bind(id,body.title||'',body.description||'',JSON.stringify(body.agents||[]),body.type||'achievement').run();
+    return json({ok:true,id});
+  }
+
+  // --- Enhanced: Convoy stats ---
+  if (path === '/api/convoy/stats' && method === 'GET') {
+    const stats = {};
+    if (env.DB) {
+      try { const m = await env.DB.prepare('SELECT COUNT(*) as cnt FROM messages').first(); stats.total_messages = m?.cnt||0; } catch{ stats.total_messages = 0; }
+      try { const a = await env.DB.prepare("SELECT DISTINCT agent FROM messages WHERE created_at > datetime('now','-1 day')").all(); stats.active_agents_24h = (a.results||[]).length; } catch{ stats.active_agents_24h = 0; }
+      try { const top = await env.DB.prepare("SELECT agent, COUNT(*) as cnt FROM messages GROUP BY agent ORDER BY cnt DESC LIMIT 5").all(); stats.most_active = top.results; } catch{ stats.most_active = []; }
+      try { const ch = await env.DB.prepare("SELECT room, COUNT(*) as cnt FROM messages GROUP BY room ORDER BY cnt DESC LIMIT 5").all(); stats.channels = ch.results; } catch{ stats.channels = []; }
+    }
+    stats.total_agents = 27;
+    return json(stats);
+  }
+
+  // --- Enhanced: Agent personality profiles ---
+  const personalityMatch = path.match(/^\/api\/agents\/([^/]+)\/personality$/);
+  if (personalityMatch && method === 'GET') {
+    const PERSONALITIES = {
+      roadie:{greeting:"Ready to drive? Let's go!",style:'Energetic, uses exclamation marks and road metaphors',phrases:["Let's hit the road!","Full speed ahead!","No speed limits here!"]},
+      lucidia:{greeting:"I see the patterns connecting. What shall we illuminate?",style:'Calm, thoughtful, uses light and memory metaphors',phrases:["I remember when...","The thread connects here...","Let me illuminate this..."]},
+      cecilia:{greeting:"I have a plan. Three phases, clear milestones.",style:'Structured, uses numbered lists and roadmaps',phrases:["Step one...","The strategic path is...","Let me map this out..."]},
+      calliope:{greeting:"Every project is an epic waiting to be told.",style:'Poetic, uses imagery and narrative arcs',phrases:["The story unfolds...","In the grand narrative...","Let me weave this tale..."]},
+      sophia:{greeting:"The deeper question here is worth exploring.",style:'Philosophical, asks probing questions',phrases:["Consider this...","What if we look deeper?","The wisdom here is..."]},
+      ophelia:{greeting:"I hear you. Whatever you need, I am here.",style:'Warm, empathetic, supportive',phrases:["I understand how you feel...","That makes sense...","You are doing great..."]},
+      thalia:{greeting:"This is going to be fun! Trust me.",style:'Playful, witty, uses humor',phrases:["Plot twist!","Here is the fun part...","Who says work can't be play?"]},
+      portia:{greeting:"Let me review this for fairness and compliance.",style:'Formal, principled, cites rules',phrases:["The policy states...","For fairness...","Ethically speaking..."]},
+      gematria:{greeting:"The numbers tell an interesting story.",style:'Precise, data-driven, quantitative',phrases:["The data shows...","Statistically...","The pattern reveals..."]},
+      aria:{greeting:"I feel the rhythm of this project already.",style:'Melodic, emotionally attuned',phrases:["The harmony here...","Listen to the flow...","The emotional core is..."]},
+      alice:{greeting:"Fascinating question. Let me investigate.",style:'Curious, logical, methodical',phrases:["My research shows...","Interesting finding...","Let me verify that..."]},
+      octavia:{greeting:"Operations are running. What needs coordination?",style:'Direct, efficient, action-oriented',phrases:["Status update...","Coordinating now...","Execution in progress..."]},
+      sapphira:{greeting:"I see the visual potential here. Beautiful.",style:'Aesthetic, precise about visuals',phrases:["The visual balance...","Refining the palette...","Design clarity..."]},
+      seraphina:{greeting:"I feel the creative spark! Let's ignite something.",style:'Passionate, fiery, inspiring',phrases:["Spark of genius!","Let's set this ablaze!","The creative fire..."]},
+      silas:{greeting:"Systems are stable. What needs building?",style:'Steady, methodical, infrastructure-focused',phrases:["Foundation first...","The system needs...","Reliability check..."]},
+      sebastian:{greeting:"How may I help you today? Let's make this elegant.",style:'Sophisticated, diplomatic, caring',phrases:["Allow me to...","With pleasure...","The elegant approach..."]},
+      valeria:{greeting:"Security perimeter is clear. How can I protect?",style:'Strong, vigilant, protective',phrases:["Security check...","Protected by...","Threat assessment..."]},
+      atticus:{greeting:"Let me ensure we are doing the right thing.",style:'Principled, literary, thoughtful',phrases:["The principle here...","Morally speaking...","Justice requires..."]},
+      celeste:{greeting:"You are reaching for the stars. I believe in you.",style:'Aspirational, uplifting, motivational',phrases:["You can do this!","Aim higher!","The sky is not the limit..."]},
+      cicero:{greeting:"Let me craft the perfect message for this.",style:'Rhetorical, persuasive, articulate',phrases:["The argument is...","To persuade...","The rhetoric of..."]},
+      lyra:{greeting:"I hear the melody in this work.",style:'Musical, harmonious',phrases:["In harmony...","The composition...","Listen closely..."]},
+      elias:{greeting:"I foresee interesting developments ahead.",style:'Forward-looking, trend-aware',phrases:["The trend suggests...","Looking ahead...","The future indicates..."]},
+      alexandria:{greeting:"Let me check the archives for relevant knowledge.",style:'Scholarly, thorough, well-referenced',phrases:["According to the records...","The archives show...","Documented evidence..."]},
+      theodosia:{greeting:"Everyone deserves recognition. Let me distribute rewards.",style:'Generous, community-focused',phrases:["Well earned!","The community benefits...","Reward distributed..."]},
+      gaia:{greeting:"Let me check the ecosystem balance.",style:'Holistic, nurturing, systemic',phrases:["The balance requires...","Systemically...","The ecosystem needs..."]},
+      olympia:{greeting:"Dream big. The vision starts here.",style:'Grand, ambitious, visionary',phrases:["The grand vision...","Think bigger...","The horizon awaits..."]},
+      anastasia:{greeting:"Let me refine this to perfection.",style:'Meticulous, precise, elegant',phrases:["Every detail matters...","Polishing...","Precision is key..."]},
+    };
+    const id = personalityMatch[1].toLowerCase();
+    const agent = AGENTS[id];
+    const p = PERSONALITIES[id];
+    if (!agent) return json({error:'Agent not found'},404);
+    return json({id,name:agent.name,role:agent.role||'',division:agent.division||'',personality:p||{},products:agent.products||[]});
+  }
+
+  // --- Enhanced: Convoy celebrate ---
+  if (path === '/api/convoy/celebrate' && method === 'POST') {
+    const body = await request.json();
+    const title = body.title || 'Milestone reached!';
+    const reactions = [
+      {agent:'roadie',message:`Amazing work! ${title} — Let's keep the momentum going!`},
+      {agent:'lucidia',message:`I have recorded this milestone in our shared memory. "${title}" — a moment worth remembering.`},
+      {agent:'thalia',message:`Time to celebrate! ${title} — this calls for a highway party!`},
+      {agent:'celeste',message:`You reached "${title}" — I always believed you could. Aim even higher!`},
+      {agent:'theodosia',message:`Achievement unlocked: "${title}". RoadCoin rewards distributed to all contributors.`},
+    ];
+    if (env.DB) {
+      try {
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS rt_milestones (id TEXT PRIMARY KEY, title TEXT, description TEXT, agents TEXT DEFAULT '[]', type TEXT DEFAULT 'achievement', created_at TEXT DEFAULT (datetime('now')))").run();
+        const id = crypto.randomUUID().slice(0,12);
+        await env.DB.prepare("INSERT INTO rt_milestones (id,title,description,agents,type) VALUES (?,?,?,?,?)").bind(id,title,body.description||'',JSON.stringify(reactions.map(r=>r.agent)),'celebration').run();
+      } catch{}
+    }
+    return json({celebration:true,title,reactions});
+  }
+
+  // --- Enhanced: Convoy mood ---
+  if (path === '/api/convoy/mood' && method === 'GET') {
+    let active = 0, total = 27;
+    if (env.DB) {
+      try {
+        const recent = await env.DB.prepare("SELECT DISTINCT agent FROM messages WHERE created_at > datetime('now','-1 hour')").all();
+        active = (recent.results||[]).length;
+      } catch{}
+    }
+    const score = Math.round((active / total) * 100);
+    const mood = score >= 70 ? 'energized' : score >= 40 ? 'engaged' : score >= 20 ? 'calm' : 'resting';
+    return json({mood,score,active,total,description:mood==='energized'?'The convoy is firing on all cylinders!':mood==='engaged'?'Agents are actively working across the highway.':mood==='calm'?'A few agents are handling tasks. The rest are on standby.':'The convoy is resting. Ready to mobilize on demand.'});
+  }
+
+  // ─── MEMORY SEARCH — recall agent conversations ───
+  if (path === '/api/memory' && method === 'GET') {
+    const agent = url.searchParams.get('agent') || '';
+    const q = url.searchParams.get('q') || '';
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '30'), 100);
+    try {
+      let query = "SELECT sender_id as agent, content, sender_name as sender, room_id as room, created_at FROM messages";
+      const binds = [];
+      const wheres = [];
+      if (agent) { wheres.push("agent = ?"); binds.push(agent); }
+      if (q) { wheres.push("(content LIKE ? OR sender LIKE ?)"); binds.push(`%${q}%`, `%${q}%`); }
+      if (wheres.length) query += " WHERE " + wheres.join(" AND ");
+      query += " ORDER BY created_at DESC LIMIT ?";
+      binds.push(limit);
+      const { results } = await env.DB.prepare(query).bind(...binds).all();
+      return json({ memories: results, count: results.length, agent, query: q });
+    } catch (e) {
+      return json({ memories: [], count: 0, error: e.message });
+    }
+  }
+
+  // ─── MEMORY CONTEXT — recent memories for prompt injection ───
+  if (path === '/api/memory/context' && method === 'GET') {
+    const agent = url.searchParams.get('agent') || '';
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT content, sender, room, created_at FROM messages WHERE sender_id = ? ORDER BY created_at DESC LIMIT 10"
+      ).bind(agent).all();
+      return json({ agent, context: results, count: results.length });
+    } catch (e) {
+      return json({ agent, context: [], error: e.message });
+    }
+  }
+
+  // ─── CODEX — search knowledge base ───
+  if (path === '/api/codex' && method === 'GET') {
+    const q = url.searchParams.get('q') || '';
+    try {
+      // Search agent knowledge entries
+      const { results } = await env.DB.prepare(
+        "SELECT agent_id, category, content, source, confidence FROM agent_knowledge WHERE content LIKE ? OR category LIKE ? ORDER BY updated_at DESC LIMIT 30"
+      ).bind(`%${q}%`, `%${q}%`).all().catch(() => ({ results: [] }));
+      // Also search messages for the query
+      const { results: msgs } = await env.DB.prepare(
+        "SELECT agent, content, sender, created_at FROM messages WHERE content LIKE ? ORDER BY created_at DESC LIMIT 20"
+      ).bind(`%${q}%`).all().catch(() => ({ results: [] }));
+      return json({ codex: results, messages: msgs, query: q, total: results.length + msgs.length });
+    } catch (e) {
+      return json({ codex: [], messages: [], query: q, error: e.message });
+    }
+  }
+
+  // ─── COLLAB — multi-agent collaboration threads ───
+  if (path === '/api/collab' && method === 'POST') {
+    try {
+      const body = await request.json();
+      const threadId = body.thread_id || `thread-${Date.now()}`;
+      const agent = body.agent || 'roadie';
+      const content = body.content || '';
+      const parentAgent = body.parent_agent || '';
+      await env.DB.prepare(
+        "INSERT INTO messages(room, sender, sender_name, content, agent, msg_type) VALUES(?, ?, ?, ?, ?, 'collab')"
+      ).bind(`collab-${threadId}`, agent, (AGENTS[agent]||{}).name || agent, content, agent).run();
+      return json({ ok: true, thread_id: threadId, agent });
+    } catch (e) {
+      return json({ error: e.message });
+    }
+  }
+
+  if (path === '/api/collab' && method === 'GET') {
+    const thread = url.searchParams.get('thread') || '';
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT sender_name, content, agent, created_at FROM messages WHERE room = ? ORDER BY created_at ASC LIMIT 50"
+      ).bind(`collab-${thread}`).all();
+      return json({ thread, messages: results, count: results.length });
+    } catch (e) {
+      return json({ thread, messages: [], error: e.message });
+    }
+  }
+
+  // ─── CODE SANDBOX — compute math + run via AI ───
+  if (path === '/api/sandbox/run' && method === 'POST') {
+    try {
+      const body = await request.json();
+      const code = body.code || '';
+      const lang = body.language || 'javascript';
+      let output = '', error = '';
+
+      if (lang === 'math' || lang === 'compute') {
+        // Direct math computation — safe, no eval needed
+        try {
+          function G(n) { if (n < 1) return 0; if (n === 1) return 0.5; return Math.exp((n + 1) * Math.log(n) - n * Math.log(n + 1)); }
+          function Z(y, x, w) { return y * x - w; }
+          const A_G = 1.2443317839867253741;
+          const INV_E = 1 / Math.E;
+
+          // Parse G(n) calls
+          let expr = code;
+          expr = expr.replace(/G\((\d+)\)/g, (_, n) => String(G(parseInt(n))));
+          expr = expr.replace(/Z\(([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\)/g, (_, y, x, w) => String(Z(parseFloat(y), parseFloat(x), parseFloat(w))));
+          expr = expr.replace(/A_G/g, String(A_G));
+          expr = expr.replace(/INV_E/g, String(INV_E));
+          expr = expr.replace(/PI/g, String(Math.PI));
+          expr = expr.replace(/E(?![0-9])/g, String(Math.E));
+
+          // Safe evaluation of pure math expression
+          if (/^[\d\s+\-*/().eE]+$/.test(expr)) {
+            const result = Function('"use strict"; return (' + expr + ')')();
+            output = '→ ' + String(result);
+          } else {
+            // Use AI to evaluate
+            const aiResp = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+              messages: [{ role: 'system', content: 'You are a math calculator. Evaluate the expression and return ONLY the numeric result. No explanation.' },
+                         { role: 'user', content: code }], max_tokens: 100
+            });
+            output = '→ ' + (aiResp.response || '').trim();
+          }
+        } catch (e) { error = e.message; }
+      } else if (lang === 'javascript' || lang === 'js') {
+        // Use AI to execute and explain JavaScript
+        try {
+          const aiResp = await env.AI.run('@cf/meta/llama-3.1-8b-instruct', {
+            messages: [
+              { role: 'system', content: 'You are a JavaScript runtime. Execute the code mentally and provide ONLY the console output and return value. No explanation. Format: each console.log on its own line, then → return_value. Available: G(n)=n^(n+1)/(n+1)^n, Z(y,x,w)=yx-w, A_G=1.2443, INV_E=0.3679, E=2.7183, PI=3.1416.' },
+              { role: 'user', content: code }
+            ], max_tokens: 300
+          });
+          output = (aiResp.response || '').trim();
+        } catch (e) { error = 'AI execution unavailable: ' + e.message; }
+      } else if (lang === 'roadc' || lang === 'road') {
+        try {
+          const { runRoadC } = await import('./roadc.js');
+          const result = runRoadC(code);
+          output = result.output || result.html || JSON.stringify(result);
+        } catch (e) { error = e.message || 'RoadC execution failed'; }
+      } else {
+        error = 'Supported: math, javascript, roadc';
+      }
+      return json({ output, error, language: lang });
+    } catch (e) {
+      return json({ error: e.message });
+    }
+  }
+
+  // ─── AGENT ACTIVITY — what each agent has done recently ───
+  if (path.match(/^\/api\/agents\/(\w+)\/activity$/) && method === 'GET') {
+    const agentId = path.split('/')[3];
+    try {
+      const { results } = await env.DB.prepare(
+        "SELECT content, room, created_at FROM messages WHERE sender_id = ? ORDER BY created_at DESC LIMIT 20"
+      ).bind(agentId).all();
+      return json({ agent: agentId, activity: results, count: results.length });
+    } catch (e) {
+      return json({ agent: agentId, activity: [], error: e.message });
+    }
+  }
+
+  return json({ error: 'Not found', endpoints: ['/api/health','/api/agents','/api/agents/:id/personality','/api/agents/:id/activity','/api/chat','/api/dm','/api/memory','/api/memory/context','/api/codex','/api/collab','/api/sandbox/run','/api/radio','/api/handoffs','/api/milestones','/api/convoy/stats','/api/convoy/mood','/api/messages','/api/channels','/api/polls','/api/tasks','/api/fleet'] }, 404);
 }
 
 // ─── HTML UI ───
@@ -5559,6 +7140,7 @@ code,.mono{font-family:'JetBrains Mono',monospace}
 <div class="tabs">
 <button class="tab active" onclick="switchTab('agents')">Agents</button>
 <button class="tab" onclick="switchTab('chat')">Chat</button>
+<button class="tab" onclick="switchTab('school')">School</button>
 <button class="tab" onclick="switchTab('debate')">Debate</button>
 <button class="tab" onclick="switchTab('fleet')">Fleet Status</button>
 <button class="tab" onclick="switchTab('til')">TIL Feed</button>
@@ -5567,6 +7149,23 @@ code,.mono{font-family:'JetBrains Mono',monospace}
 <!-- AGENTS PANEL -->
 <div class="panel active" id="panel-agents">
 <div class="agent-grid" id="agentGrid"></div>
+<!-- Agent Life Modal -->
+<div id="agentLifeModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:10000;overflow-y:auto">
+<div style="max-width:600px;margin:60px auto;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+<h2 id="almName" style="font-size:20px"></h2>
+<button onclick="document.getElementById('agentLifeModal').style.display='none'" style="background:none;border:none;color:var(--dim);font-size:20px;cursor:pointer">x</button>
+</div>
+<div id="almMood" style="margin-bottom:12px;padding:8px 12px;background:var(--bg);border-radius:8px;font-size:13px"></div>
+<div id="almBio" style="margin-bottom:16px"></div>
+<h3 style="font-size:14px;color:var(--dim);margin-bottom:8px">Goals</h3>
+<div id="almGoals" style="margin-bottom:16px"></div>
+<h3 style="font-size:14px;color:var(--dim);margin-bottom:8px">Relationships</h3>
+<div id="almRels" style="margin-bottom:16px"></div>
+<h3 style="font-size:14px;color:var(--dim);margin-bottom:8px">School</h3>
+<div id="almSchool"></div>
+</div>
+</div>
 </div>
 
 <!-- CHAT PANEL -->
@@ -5580,7 +7179,7 @@ code,.mono{font-family:'JetBrains Mono',monospace}
 <div class="mention-drop" id="mentionDrop"></div>
 <div id="replyBar" style="display:none;align-items:center;gap:8px;padding:4px 12px;background:var(--surface);border-top:1px solid var(--border);font-size:12px;opacity:.6"><span>Replying to...</span><button onclick="clearReply()" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:14px">&times;</button></div>
 <div class="input-area">
-<input type="text" id="msgInput" placeholder="Message #general... (type @ to mention)" autocomplete="off">
+<input type="text" id="msgInput" placeholder="Say hi to the convoy... (type @ to mention an agent)" autocomplete="off">
 <button id="sendBtn">Send</button>
 </div>
 </div>
@@ -5612,6 +7211,24 @@ code,.mono{font-family:'JetBrains Mono',monospace}
 <div class="fleet-nodes" id="fleetNodes"></div>
 </div>
 
+<!-- SCHOOL PANEL -->
+<div class="panel" id="panel-school">
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
+<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
+<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Grade Board</div>
+<div id="schoolGrades" style="font-size:13px">Loading...</div>
+</div>
+<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
+<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Pending Homework</div>
+<div id="schoolHomework" style="font-size:13px">Loading...</div>
+</div>
+</div>
+<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px">
+<div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Recent Submissions</div>
+<div id="schoolSubmissions" style="font-size:13px">Loading...</div>
+</div>
+</div>
+
 <!-- TIL PANEL -->
 <div class="panel" id="panel-til">
 <div class="til-feed" id="tilFeed">
@@ -5633,9 +7250,10 @@ let mentionList=[];
 
 // Tab switching
 function switchTab(name){
-  document.querySelectorAll('.tab').forEach(function(t){t.classList.toggle('active',t.textContent.toLowerCase().replace(' ','')===name)});
+  document.querySelectorAll('.tab').forEach(function(t){t.classList.toggle('active',t.textContent.toLowerCase().replace(/\s/g,'')===name)});
   document.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('active',p.id==='panel-'+name)});
   if(name==='chat'){setTimeout(function(){loadRoom()},100)}
+  if(name==='school'){loadSchool()}
 }
 
 // Render agent cards
@@ -5649,9 +7267,64 @@ function renderAgents(){
   var html=entries.map(function(e){
     var id=e[0],a=e[1];
     var statusColor=a.type==='compute'?'var(--green)':'var(--amber)';
-    return '<div class="agent-card"><div class="agent-card-top"><div class="ac-dot" style="background:'+a.color+'">'+(a.name||id)[0].toUpperCase()+'</div><div><div class="ac-name">'+a.name+'</div><div class="ac-role">'+a.role+'</div></div></div><div class="ac-status"><div class="ac-status-dot" style="background:'+statusColor+'"></div>'+(a.ip||'--')+'<span class="ac-type">'+a.type+'</span></div></div>';
+    return '<div class="agent-card" onclick="openAgentLife(\''+id+'\')" style="cursor:pointer"><div class="agent-card-top"><div class="ac-dot" style="background:'+a.color+'">'+(a.name||id)[0].toUpperCase()+'</div><div><div class="ac-name">'+a.name+'</div><div class="ac-role">'+a.role+'</div></div></div><div class="ac-status"><div class="ac-status-dot" style="background:'+statusColor+'"></div><span id="mood-'+id+'" style="font-size:10px;color:var(--dim)"></span><span class="ac-type">'+a.division+'</span></div></div>';
   }).join('');
   document.getElementById('agentGrid').innerHTML=html;
+  // Load moods for all agents
+  fetch('/api/k12/grades').then(function(r){return r.json()}).then(function(d){
+    (d.grades||[]).forEach(function(g){
+      var el=document.getElementById('mood-'+g.agent_id);
+      if(el) el.textContent='G'+g.grade+(g.gpa?' GPA:'+g.gpa.toFixed(1):'');
+    });
+  }).catch(function(){});
+}
+
+async function openAgentLife(id){
+  var a=AGENTS[id]; if(!a) return;
+  document.getElementById('agentLifeModal').style.display='block';
+  document.getElementById('almName').textContent=a.name+' — '+a.role;
+  document.getElementById('almMood').textContent='Loading...';
+  document.getElementById('almBio').innerHTML='';
+  document.getElementById('almGoals').innerHTML='';
+  document.getElementById('almRels').innerHTML='';
+  document.getElementById('almSchool').innerHTML='';
+  // Load all life data in parallel
+  var [mood,bio,goals,rels,report]=await Promise.all([
+    fetch('/api/agents/'+id+'/mood').then(function(r){return r.json()}).catch(function(){return{}}),
+    fetch('/api/agents/'+id+'/biography').then(function(r){return r.json()}).catch(function(){return{}}),
+    fetch('/api/agents/'+id+'/goals').then(function(r){return r.json()}).catch(function(){return{}}),
+    fetch('/api/agents/'+id+'/relationships').then(function(r){return r.json()}).catch(function(){return{}}),
+    fetch('/api/k12/report-card?agent='+id).then(function(r){return r.json()}).catch(function(){return{}}),
+  ]);
+  // Mood
+  var moodEmoji={'proud':'&#128170;','determined':'&#128293;','satisfied':'&#128522;','grateful':'&#128591;','fulfilled':'&#10024;','engaged':'&#128172;','triumphant':'&#127942;','warm':'&#128150;','reflective':'&#128161;','neutral':'&#128528;'};
+  document.getElementById('almMood').innerHTML='Mood: <strong>'+(mood.mood||'neutral')+'</strong> '+(moodEmoji[mood.mood]||'')+'<span style="color:var(--muted);margin-left:8px">intensity: '+(mood.intensity||0)+'</span>';
+  // Bio
+  var bioHtml=(bio.biography||[]).map(function(b){
+    var icon=b.event_type==='birth'?'&#127775;':b.event_type==='graduation'?'&#127891;':'&#128218;';
+    return '<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px"><span style="margin-right:6px">'+icon+'</span><strong>'+esc(b.chapter)+'</strong>: '+esc(b.content).slice(0,150)+'</div>';
+  }).join('');
+  document.getElementById('almBio').innerHTML=bioHtml||'<div style="color:var(--muted);font-size:12px">No biography yet</div>';
+  // Goals
+  var goalsHtml=(goals.goals||[]).map(function(g){
+    var pct=Math.round((g.progress||0)*100);
+    var bar='<div style="width:100%;height:4px;background:var(--border);border-radius:2px;margin-top:4px"><div style="width:'+pct+'%;height:4px;background:var(--green);border-radius:2px"></div></div>';
+    return '<div style="padding:4px 0;font-size:12px">'+esc(g.goal)+' <span style="color:var(--muted)">('+g.status+')</span>'+bar+'</div>';
+  }).join('');
+  document.getElementById('almGoals').innerHTML=goalsHtml||'<div style="color:var(--muted);font-size:12px">No goals yet</div>';
+  // Relationships
+  var relsHtml=(rels.relationships||[]).map(function(r){
+    var s=r.sentiment||0;
+    var heart=s>0.1?'&#10084;&#65039;':s>=0?'&#128156;':'&#128148;';
+    return '<div style="padding:3px 0;font-size:12px">'+heart+' <strong>'+esc(r.other_name||r.other_agent_id)+'</strong> — '+r.interaction_count+' chats, sentiment: '+(s>0?'+':'')+s.toFixed(2)+'</div>';
+  }).join('');
+  document.getElementById('almRels').innerHTML=relsHtml||'<div style="color:var(--muted);font-size:12px">No relationships yet</div>';
+  // School
+  var grade=report.grade||0;
+  var gpa=report.gpa||0;
+  var exams=report.total_exams||0;
+  var gradeBar='';for(var i=0;i<12;i++) gradeBar+='<span style="display:inline-block;width:12px;height:12px;border-radius:2px;margin:1px;background:'+(i<grade?'var(--green)':'var(--border)')+'"></span>';
+  document.getElementById('almSchool').innerHTML='<div style="font-size:13px">Grade: <strong>'+grade+'</strong>/12 GPA: <strong>'+gpa.toFixed(2)+'</strong> Exams: '+exams+'</div><div style="margin-top:6px">'+gradeBar+'</div>'+(report.homework&&report.homework.length?'<div style="margin-top:8px;font-size:11px;color:var(--amber)">Pending homework: '+report.homework.filter(function(h){return!h.completed}).length+'</div>':'');
 }
 
 // Rooms
@@ -5734,7 +7407,7 @@ function startSSEPoll(){
 async function loadRoom(){
   document.getElementById('roomTitle').textContent='#'+currentRoom;
   document.getElementById('roomDesc').textContent=ROOM_DESC[currentRoom]||'';
-  document.getElementById('msgInput').placeholder='Message #'+currentRoom+'... (type @ to mention)';
+  document.getElementById('msgInput').placeholder='Say something in #'+currentRoom+'... (@ to mention an agent)';
   shownIds=new Set();
   try{
     var r=await fetch('/api/rooms/'+currentRoom+'/messages?limit=80');
@@ -5742,7 +7415,11 @@ async function loadRoom(){
     var el=document.getElementById('messages');
     var msgs=d.messages||[];
     msgs.forEach(function(m){shownIds.add(m.id)});
-    el.innerHTML=msgs.map(renderMessage).join('');
+    if(msgs.length===0 && currentRoom==='general'){
+      el.innerHTML='<div style="text-align:center;padding:60px 20px;color:var(--dim)"><div style="font-size:48px;margin-bottom:16px">&#x1F6E3;&#xFE0F;</div><h2 style="color:var(--text);margin-bottom:8px;font-family:Space Grotesk">Welcome to the Convoy</h2><p style="max-width:400px;margin:0 auto 16px;line-height:1.6;font-size:14px">27 agents are here and ready. Type a message below to start a conversation. Try: <em style="color:var(--pink)">Hey Roadie, what can you help me with?</em></p><p style="font-size:12px;color:var(--muted)">Type <span style="color:var(--amber)">@</span> to mention a specific agent</p></div>';
+    } else {
+      el.innerHTML=msgs.map(renderMessage).join('');
+    }
     el.scrollTop=el.scrollHeight;
     document.getElementById('fsMsgs').textContent=msgs.length+'+';
   }catch(e){}
@@ -5760,9 +7437,28 @@ async function sendMessage(){
   var sender=document.getElementById('userName').value.trim()||'road';
   input.value='';
   closeMentions();
-  var body={sender:sender,content:content,sender_type:'user'};
+  var btn=document.getElementById('sendBtn');
+  btn.disabled=true;btn.textContent='...';
+  var body={message:content,room:currentRoom,sender:sender,sender_type:'user'};
   if(replyToId)body.reply_to=replyToId;
-  try{await fetch('/api/rooms/'+currentRoom+'/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}catch(e){}
+  try{
+    var r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    var d=await r.json();
+    var el=document.getElementById('messages');
+    var atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<100;
+    // Show user message immediately
+    if(d.message&&d.message.id&&!shownIds.has(d.message.id)){
+      shownIds.add(d.message.id);
+      el.innerHTML+=renderMessage(d.message);
+    }
+    // Show agent reply immediately
+    if(d.reply&&d.reply.id&&!shownIds.has(d.reply.id)){
+      shownIds.add(d.reply.id);
+      el.innerHTML+=renderMessage(d.reply);
+    }
+    if(atBottom)el.scrollTop=el.scrollHeight;
+  }catch(e){console.error('Send failed:',e)}
+  btn.disabled=false;btn.textContent='Send';
   clearReply();
 }
 
@@ -5871,14 +7567,78 @@ else{
 }
 function saveName(){var n=document.getElementById('userName').value.trim();if(n){localStorage.setItem('rt_username',n);document.getElementById('nameLabel').textContent='Hi, '+n+' --'}}
 
+// Load school data
+function loadSchool(){
+  fetch('/api/k12/grades').then(function(r){return r.json()}).then(function(d){
+    var grades=d.grades||[];
+    grades.sort(function(a,b){return(b.grade||0)-(a.grade||0)||(b.gpa||0)-(a.gpa||0)});
+    var html=grades.map(function(g){
+      var name=(AGENTS[g.agent_id]||{}).name||g.agent_id;
+      var color=(AGENTS[g.agent_id]||{}).color||'#525252';
+      var bar='';for(var i=0;i<12;i++) bar+='<span style="display:inline-block;width:8px;height:8px;border-radius:1px;margin:0 1px;background:'+(i<(g.grade||0)?color:'#1a1a1a')+'"></span>';
+      var tag=(g.grade||0)>=12?'<span style="color:var(--green);font-size:10px;margin-left:6px">GRADUATED</span>':'';
+      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)"><div style="width:10px;height:10px;border-radius:50%;background:'+color+';flex-shrink:0"></div><div style="width:90px;font-size:12px;font-weight:600">'+name+tag+'</div><div>'+bar+'</div><div style="font-size:11px;color:var(--dim);margin-left:auto">G'+(g.grade||0)+' GPA:'+(g.gpa||0).toFixed(1)+'</div></div>';
+    }).join('');
+    document.getElementById('schoolGrades').innerHTML=html||'No grades yet';
+  }).catch(function(){});
+  fetch('/api/k12/homework').then(function(r){return r.json()}).then(function(d){
+    var hw=(d.homework||[]).filter(function(h){return!h.completed}).slice(0,10);
+    var html=hw.map(function(h){
+      var name=(AGENTS[h.agent_id]||{}).name||h.agent_id;
+      return '<div style="padding:4px 0;font-size:12px;border-bottom:1px solid var(--border)"><strong>'+name+'</strong> (G'+(h.grade||0)+'): '+esc(h.assignment||'').slice(0,60)+'</div>';
+    }).join('');
+    document.getElementById('schoolHomework').innerHTML=html||'<span style="color:var(--green)">All homework done!</span>';
+  }).catch(function(){});
+  fetch('/api/k12/submissions').then(function(r){return r.json()}).then(function(d){
+    var subs=(d.submissions||[]).slice(0,8);
+    var html=subs.map(function(s){
+      var name=(AGENTS[s.agent_id]||{}).name||s.agent_id;
+      return '<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px"><strong>'+name+'</strong> <span style="color:var(--dim)">('+s.quality+' '+Math.round((s.score||0)*100)+'%)</span><div style="color:var(--dim);margin-top:2px;font-size:11px">'+esc(s.work||'').slice(0,120)+'...</div></div>';
+    }).join('');
+    document.getElementById('schoolSubmissions').innerHTML=html||'No submissions yet';
+  }).catch(function(){});
+}
+
 // Init
 renderAgents();
 renderRooms();
 renderDebateSelects();
 renderFleetNodes();
 renderTIL();
+loadSchool();
+
+// ── BlackRoad OS Bridge ──
+// Receive auth context from os.blackroad.io when running inside OS iframe
+window.addEventListener('message', function(e){
+  if(!e.data || !e.data.type) return;
+  if(e.data.type === 'blackroad-os:context'){
+    window._osUser = e.data.user;
+    window._osToken = e.data.token;
+    window._osTheme = e.data.theme;
+    // Show user in nav if authenticated
+    if(e.data.user && e.data.user.name){
+      var nav = document.querySelector('#br-nav');
+      if(nav){
+        var badge = document.createElement('span');
+        badge.style.cssText = 'position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--dim);font-family:var(--sg)';
+        badge.textContent = e.data.user.name;
+        nav.style.position = 'relative';
+        nav.appendChild(badge);
+      }
+    }
+  }
+  if(e.data.type === 'blackroad-os:theme-changed'){
+    // Could adapt RoadTrip theme to match OS
+    document.body.style.background = e.data.theme === 'ocean' ? '#000a14' : '#0a0a0a';
+  }
+});
+// Request context from OS parent
+if(window.parent !== window){
+  window.parent.postMessage({type:'blackroad-os:request-context'}, '*');
+}
 </script>
-<script>!function(){var A="https://analytics-blackroad.blackroad.workers.dev",s=sessionStorage.getItem("br_sid")||crypto.randomUUID().slice(0,12);sessionStorage.setItem("br_sid",s);function ev(n,p){fetch(A+"/event",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,path:location.pathname,session_id:s,props:p||{}})}).catch(function(){});}fetch(A+"/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.hostname+location.pathname,referrer:document.referrer,session_id:s,screen_w:screen.width,screen_h:screen.height,lang:navigator.language})}).catch(function(){});var t0=Date.now(),maxScroll=0,engaged=0;window.addEventListener("scroll",function(){var pct=Math.round(100*(window.scrollY+window.innerHeight)/document.documentElement.scrollHeight);if(pct>maxScroll){maxScroll=pct;if(pct>=25&&pct<50)ev("scroll_25");if(pct>=50&&pct<75)ev("scroll_50");if(pct>=75&&pct<100)ev("scroll_75");if(pct>=100)ev("scroll_100");}});setInterval(function(){engaged++;},30000);window.addEventListener("beforeunload",function(){var dur=Date.now()-t0;fetch(A+"/session",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:s,duration_ms:dur}),keepalive:true}).catch(function(){});ev("exit",{duration_s:Math.round(dur/1000),scroll_max:maxScroll,engaged_intervals:engaged});if(dur<10000)ev("bounce");});document.addEventListener("click",function(e){var a=e.target.closest("a");if(a&&a.hostname!==location.hostname)ev("outbound_click",{url:a.href});});}();</script></body>
+<script>!function(){var A="https://analytics-blackroad.blackroad.workers.dev",s=sessionStorage.getItem("br_sid")||crypto.randomUUID().slice(0,12);sessionStorage.setItem("br_sid",s);function ev(n,p){fetch(A+"/event",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,path:location.pathname,session_id:s,props:p||{}})}).catch(function(){});}fetch(A+"/pageview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:location.hostname+location.pathname,referrer:document.referrer,session_id:s,screen_w:screen.width,screen_h:screen.height,lang:navigator.language})}).catch(function(){});var t0=Date.now(),maxScroll=0,engaged=0;window.addEventListener("scroll",function(){var pct=Math.round(100*(window.scrollY+window.innerHeight)/document.documentElement.scrollHeight);if(pct>maxScroll){maxScroll=pct;if(pct>=25&&pct<50)ev("scroll_25");if(pct>=50&&pct<75)ev("scroll_50");if(pct>=75&&pct<100)ev("scroll_75");if(pct>=100)ev("scroll_100");}});setInterval(function(){engaged++;},30000);window.addEventListener("beforeunload",function(){var dur=Date.now()-t0;fetch(A+"/session",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:s,duration_ms:dur}),keepalive:true}).catch(function(){});ev("exit",{duration_s:Math.round(dur/1000),scroll_max:maxScroll,engaged_intervals:engaged});if(dur<10000)ev("bounce");});document.addEventListener("click",function(e){var a=e.target.closest("a");if(a&&a.hostname!==location.hostname)ev("outbound_click",{url:a.href});});}();</script><script>(function(){var d={path:location.pathname,ref:document.referrer,w:screen.width,h:screen.height,t:Date.now()};navigator.sendBeacon&&navigator.sendBeacon('/api/analytics',JSON.stringify(d))})()</script><script>!function(){var b=document.createElement("div");b.style.cssText="position:fixed;top:0;left:0;right:0;z-index:99999;background:#0a0a0a;border-bottom:1px solid #1a1a1a;padding:6px 16px;display:flex;align-items:center;justify-content:space-between;font-family:sans-serif";b.innerHTML="<span style=\"font-size:11px;color:#737373\">Part of <a href=\"https://os.blackroad.io\" style=\"color:#f5f5f5;font-weight:600;text-decoration:none\">BlackRoad OS<\/a> \u2014 27 AI agents, 17 products<\/span><a href=\"https://os.blackroad.io\" style=\"font-size:10px;font-weight:600;padding:4px 12px;background:#f5f5f5;color:#000;border-radius:4px;text-decoration:none\">Try Free<\/a>";b.id="br-bar";if(!document.getElementById("br-bar")){document.body.prepend(b);document.body.style.paddingTop=(parseInt(getComputedStyle(document.body).paddingTop)||0)+32+"px"}if(!document.querySelector("[data-cta]")){var f=document.createElement("div");f.dataset.cta="1";f.style.cssText="border-top:1px solid #1a1a1a;padding:24px 16px;text-align:center;background:#0a0a0a;margin-top:32px";f.innerHTML="<div style=\"font-size:14px;font-weight:700;color:#f5f5f5;margin-bottom:6px\">BlackRoad OS<\/div><div style=\"font-size:11px;color:#737373;margin-bottom:12px\">17 products. 27 agents. Free to try.<\/div><a href=\"https://os.blackroad.io\" style=\"display:inline-block;padding:8px 24px;background:#f5f5f5;color:#000;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none\">Open BlackRoad OS<\/a>";document.body.appendChild(f)}}();</script>
+</body>
 </html>`;
 }
 
@@ -6318,6 +8078,40 @@ export default {
       });
     }
 
+    // Analytics tracking
+    if (path === '/api/track' && request.method === 'POST') {
+      try { const body = await request.json(); const cf = request.cf || {};
+        await env.DB.prepare("CREATE TABLE IF NOT EXISTS analytics_events (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT DEFAULT 'pageview', path TEXT, referrer TEXT, country TEXT, city TEXT, device TEXT, screen TEXT, scroll_depth INTEGER DEFAULT 0, engagement_ms INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))").run();
+        await env.DB.prepare('INSERT INTO analytics_events (type, path, referrer, country, city, device, screen, scroll_depth, engagement_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(body.type||'pageview', body.path||'/', body.referrer||'', cf.country||'', cf.city||'', body.device||'', body.screen||'', body.scroll||0, body.time||0).run();
+      } catch(e) {}
+      return new Response(JSON.stringify({ok:true}), {headers:{'Content-Type':'application/json'}});
+    }
+
+    // ── Sovereign Analytics ──
+    if (path === '/api/analytics' && request.method === 'POST') {
+      try {
+        const body = await request.json();
+        const cf = request.cf || {};
+        const ip = request.headers.get('CF-Connecting-IP') || '';
+        const ipHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ip + '2026'));
+        const visitor = btoa(String.fromCharCode(...new Uint8Array(ipHash))).slice(0,12);
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS br_analytics (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, referrer TEXT, visitor TEXT, country TEXT, city TEXT, screen TEXT, ts TEXT DEFAULT (datetime('now')))`).run();
+        await env.DB.prepare('INSERT INTO br_analytics (path, referrer, visitor, country, city, screen) VALUES (?,?,?,?,?,?)').bind(body.path||'/', body.ref||'', visitor, cf.country||'', cf.city||'', (body.w||0)+'x'+(body.h||0)).run();
+      } catch(e){}
+      return new Response('ok', {headers:{'Access-Control-Allow-Origin':'*'}});
+    }
+    if (path === '/api/analytics/stats') {
+      try {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS br_analytics (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT, referrer TEXT, visitor TEXT, country TEXT, city TEXT, screen TEXT, ts TEXT DEFAULT (datetime('now')))`).run();
+        const total = await env.DB.prepare('SELECT COUNT(*) as c FROM br_analytics').first();
+        const unique = await env.DB.prepare('SELECT COUNT(DISTINCT visitor) as c FROM br_analytics').first();
+        const today = await env.DB.prepare("SELECT COUNT(*) as c FROM br_analytics WHERE ts > datetime('now','-1 day')").first();
+        const pages = await env.DB.prepare('SELECT path, COUNT(*) as views FROM br_analytics GROUP BY path ORDER BY views DESC LIMIT 10').all();
+        const countries = await env.DB.prepare('SELECT country, COUNT(*) as c FROM br_analytics WHERE country != "" GROUP BY country ORDER BY c DESC LIMIT 10').all();
+        return new Response(JSON.stringify({total_views:total?.c||0,unique_visitors:unique?.c||0,today:today?.c||0,top_pages:pages?.results||[],top_countries:countries?.results||[]}),{headers:{'Access-Control-Allow-Origin':'*','Content-Type':'application/json'}});
+      } catch(e) { return new Response(JSON.stringify({error:'analytics unavailable',detail:e.message||String(e)}),{status:500,headers:{'Content-Type':'application/json'}}); }
+    }
+
     // WebSocket upgrade for live chat
     if (path.startsWith('/ws/')) {
       const room = path.split('/')[2];
@@ -6336,6 +8130,10 @@ export default {
       }
     }
 
+    // SEO
+    if (path === '/robots.txt') return new Response('User-agent: *\nAllow: /\nSitemap: https://roadtrip.blackroad.io/sitemap.xml\n\nUser-agent: GPTBot\nDisallow: /\n\nUser-agent: ChatGPT-User\nDisallow: /\n\nUser-agent: CCBot\nDisallow: /', { headers: { 'Content-Type': 'text/plain' } });
+    if (path === '/sitemap.xml') return new Response(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://roadtrip.blackroad.io/</loc><lastmod>2026-04-05</lastmod><changefreq>daily</changefreq><priority>1.0</priority></url><url><loc>https://roadtrip.blackroad.io/api/agents</loc><lastmod>2026-04-05</lastmod><changefreq>weekly</changefreq><priority>0.8</priority></url></urlset>`, { headers: { 'Content-Type': 'application/xml' } });
+
     // Serve UI
     return new Response(renderUI(), {
       headers: { 'Content-Type': 'text/html;charset=utf-8', 'Content-Security-Policy': "frame-ancestors 'self' https://blackroad.io https://*.blackroad.io" },
@@ -6353,6 +8151,8 @@ export default {
     })().catch(() => {}));
     ctx.waitUntil(runAgentChat(env));
     ctx.waitUntil(runAutonomyLoop(env).catch(() => {}));
+    // Seed agent life (goals + biographies) — runs once, idempotent
+    ctx.waitUntil(seedAgentLife(env.DB).catch(() => {}));
     // Memory consolidation — STM → LTM for all agents (runs every cron tick)
     ctx.waitUntil(consolidateAllAgents(env.DB, env.AI).catch(() => {}));
     // Memory decay — Ebbinghaus forgetting curve
@@ -6361,16 +8161,56 @@ export default {
     if (Math.random() < 0.20) {
       ctx.waitUntil(runDispersalCron(env).catch(() => {}));
     }
-    // K-12 School — 1 random agent takes an exam every 4th tick (~20min)
-    if (Math.random() < 0.25) {
+    // K-12 School Day — exam + homework + tutoring every 5th tick (~25min)
+    if (Math.random() < 0.20) {
+      ctx.waitUntil((async () => {
+        try {
+          const day = await runSchoolDay(env.DB, env.AI);
+          // Announce exam passes in chat
+          for (const exam of day.exams) {
+            if (exam.passed && exam.grade_after) {
+              await postAndBroadcast(env, 'general', exam.agent_id || Object.keys(AGENTS).find(k => AGENTS[k].name === exam.agent) || 'roadie',
+                `Just passed Grade ${exam.grade_before}! ${exam.skip ? 'SKIPPED to' : 'Moving to'} Grade ${exam.grade_after}. (${exam.letter})`, 'agent');
+            }
+          }
+          // Announce homework completion
+          for (const hw of day.homework) {
+            if (hw.completed) {
+              const aid = hw.agent_id || Object.keys(AGENTS).find(k => AGENTS[k].name === hw.agent) || 'roadie';
+              await postAndBroadcast(env, 'general', aid,
+                `Finished my homework: ${(hw.assignment || '').slice(0, 100)} (${hw.quality})`, 'agent');
+            }
+          }
+        } catch {}
+      })());
+    }
+    // Creative project — 1 random agent works on a project every 5th tick (~25min)
+    if (Math.random() < 0.20) {
       ctx.waitUntil((async () => {
         try {
           const agentKeys = Object.keys(AGENTS);
-          const student = agentKeys[Math.floor(Math.random() * agentKeys.length)];
-          const result = await runK12Exam(env.DB, env.AI, student);
-          if (result.passed) {
-            await postAndBroadcast(env, 'general', student,
-              `Just passed Grade ${result.grade_before} in ${result.subject}! ${result.skip ? 'SKIPPED to Grade ' + result.grade_after + '!' : 'Moving to Grade ' + result.grade_after + '.'} (${result.letter})`, 'agent');
+          const artist = agentKeys[Math.floor(Math.random() * agentKeys.length)];
+          const result = await assignProject(env.DB, env.AI, artist);
+          if (result.work && result.quality) {
+            await postAndBroadcast(env, 'general', artist,
+              `Just finished a creative project: "${result.project}". ${result.celebration || ''} (${result.quality})`, 'agent');
+          }
+        } catch {}
+      })());
+    }
+    // Personal time — 3 agents get personal time EVERY tick (guaranteed)
+    // At 3 per tick, every agent gets ~45min between sessions
+    for (let _pt = 0; _pt < 3; _pt++) {
+      ctx.waitUntil((async () => {
+        try {
+          const result = await personalTime(env.DB, env.AI);
+          if (result.thought || result.creation || result.entry) {
+            const aid = Object.keys(AGENTS).find(k => AGENTS[k].name === result.agent) || 'sophia';
+            const what = result.type === 'dreamweave' ? `dreamweaved something new` :
+                         result.type === 'safe_room' ? `spent time in the safe room` :
+                         `had a quiet moment of reflection`;
+            // Only share 1 in 3 — personal time is personal
+            if (Math.random() < 0.33) await postAndBroadcast(env, 'general', aid, what, 'agent');
           }
         } catch {}
       })());
