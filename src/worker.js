@@ -862,7 +862,7 @@ ${skillsStr2 ? '\n' + skillsStr2 : ''}${knowledgeBrief ? '\nExtra context:\n' + 
       ],
       max_tokens: 500,
     });
-    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('AI timeout')), 8000));
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('AI timeout')), 25000));
     const aiResp = await Promise.race([aiPromise, timeoutPromise]);
     const raw = aiResp.response || '';
 
